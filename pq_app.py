@@ -207,11 +207,56 @@ with tab3:
 # ---------------------------------------------------------
 # [Tab 4] 서류 출력 및 증빙 자동 패키징 (유지)
 # ---------------------------------------------------------
+import zipfile
+
+# ---------------------------------------------------------
+# [Tab 4] 서류 출력 및 증빙 자동 패키징 (최종 ZIP 엔진 탑재)
+# ---------------------------------------------------------
 with tab4:
     st.subheader("최종 출력 및 제출 파일 다운로드")
-    st.info("선택된 기술자의 실적을 기반으로 서류가 작성되며, 관련 증빙 PDF를 자동으로 스캔하여 압축합니다.")
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        pd.DataFrame({'테스트': ['이 파일은 자동 생성된 자기평가표 샘플입니다.']}).to_excel(writer, index=False)
-    output.seek(0)
-    st.download_button(label="📦 최종 제출 패키지 다운로드", data=output, file_name="최종제출패키지_자동완성.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.info("💡 [AI 배정] 또는 [수동 계산]으로 확정된 기술자 명단을 바탕으로 자기평가표가 작성되며, 필요한 증빙 PDF들만 자동으로 모아 ZIP으로 압축합니다.")
+    
+    # 패키징 엔진 가동
+    if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
+        with st.spinner("엑셀 서류 작성 및 구글 드라이브 증빙자료를 수집하여 압축 중입니다..."):
+            time.sleep(2) # 파일 수집(스캔) 딜레이 시뮬레이션
+            
+            # 1. 엑셀 파일들을 담을 메모리 버퍼 준비
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                # 시뮬레이션된 평가 결과를 '자기평가표' 시트에 작성
+                df_eval = pd.DataFrame({
+                    "평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"],
+                    "획득점수": [30.0, 20.0, 10.0, 0.0],
+                    "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]
+                })
+                df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                
+                # 기술자 명단을 '별지5_경력사항' 시트에 작성
+                df_career = engine.master_db[['이름', '전문분야', '경력점수', '실적점수']]
+                df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
+            
+            # 2. ZIP 파일 메모리 버퍼 생성 (서버 하드디스크 미사용)
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # [A] 완성된 엑셀 파일을 ZIP 안에 넣기
+                zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
+                
+                # [B] 증빙 PDF 파일들을 ZIP 안의 '3_증빙자료' 폴더에 넣기 (가상 파일로 시뮬레이션)
+                dummy_pdf_content = b"%PDF-1.4\n%This is a simulated PDF file for evidence."
+                zip_file.writestr("3_증빙자료/윤석순_상하수도_실적증명서.pdf", dummy_pdf_content)
+                zip_file.writestr("3_증빙자료/황흥만_토질지질_실적증명서.pdf", dummy_pdf_content)
+                zip_file.writestr("3_증빙자료/회사_신용평가등급확인서.pdf", dummy_pdf_content)
+            
+            zip_buffer.seek(0)
+            
+            st.success("✅ 최종 패키징이 완료되었습니다! 아래 버튼을 눌러 다운로드하세요.")
+            
+            # 3. 최종 ZIP 파일 다운로드 버튼 노출
+            st.download_button(
+                label="📦 최종 제출 패키지 다운로드 (.zip)",
+                data=zip_buffer,
+                file_name="최종_PQ_제출서류_패키지.zip",
+                mime="application/zip",
+                type="primary"
+            )
