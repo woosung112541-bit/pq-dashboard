@@ -123,28 +123,99 @@ with tab2:
 # ---------------------------------------------------------
 # [Tab 3] 책임기술자 선택 및 PQ 시뮬레이션
 # ---------------------------------------------------------
+# ---------------------------------------------------------
+# [Tab 3] 책임기술자 선택 및 PQ 시뮬레이션
+# ---------------------------------------------------------
 with tab3:
-    st.subheader("평가 대상 기술자 선택")
-    col_x, col_y, col_z = st.columns(3)
+    st.subheader("평가 대상 기술자 구성 및 배정")
     
-    with col_x:
-        st.selectbox("사업책임기술인", ["(선택)", "윤석순", "김대리"])
-    with col_y:
-        st.selectbox("분야별책임 (상하수도)", ["(공란)", "윤석순", "김대리"])
-    with col_z:
-        st.selectbox("분야별책임 (토질지질)", ["(공란)", "황흥만", "김진규"])
+    st.markdown("#### 1. 필요 인원(T/O) 설정")
+    st.caption("이번 공고에서 요구하는 직책(사책/분책/분참)과 필요 인원수를 설정해 주세요.")
+    
+    col_pm, col_pe, col_pes = st.columns(3)
+    
+    # 사책 설정
+    with col_pm:
+        st.write("**사업책임기술인(사책)**")
+        need_pm = st.checkbox("사책 필요", value=True)
+        pm_cnt = st.number_input("사책 인원수", min_value=1, max_value=5, value=1) if need_pm else 0
         
+    # 분책 설정
+    with col_pe:
+        st.write("**분야별책임기술인(분책)**")
+        need_pe = st.checkbox("분책 필요", value=True)
+        pe_cnt = st.number_input("분책 인원수", min_value=1, max_value=10, value=2) if need_pe else 0
+        
+    # 분참 설정
+    with col_pes:
+        st.write("**분야별참여기술인(분참)**")
+        need_pes = st.checkbox("분참 필요", value=True)
+        pes_cnt = st.number_input("분참 인원수", min_value=1, max_value=10, value=2) if need_pes else 0
+
     st.markdown("---")
-    if st.button("📊 점수 계산하기 (시뮬레이션 시작)", type="primary"):
-        with st.spinner('마스터 DB를 분석하여 점수를 계산 중입니다...'):
-            st.write("### 🏆 최종 예상 가채점 결과: 57.4 점 / 60 점 만점")
-            df_result = pd.DataFrame({
-                "평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"],
-                "배점": [30, 20, 10, -5],
-                "획득점수": [27.6, 20.0, 9.8, 0.0],
-                "비고": ["윤석순 경력 17점", "진행중 0건", "BB- 등급", "해당없음"]
-            })
-            st.dataframe(df_result, use_container_width=True)
+    
+    st.markdown("#### 2. 기술자 배정 방식")
+    assign_mode = st.radio(
+        "배정 방식을 선택하세요:",
+        ["🤖 AI 최적 인원 자동 배정 (최고점 추천)", "🧑‍🔧 수동 인원 직접 선택"],
+        horizontal=True
+    )
+    
+    if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
+        st.info("💡 마스터 DB의 모든 기술자 경력을 스캔하여, 감점이 없고 최고점을 받을 수 있는 **'최적의 드림팀 조합'**을 시스템이 자동으로 찾아냅니다.")
+        if st.button("🚀 AI 최적 드림팀 찾기 (시뮬레이션 시작)", type="primary"):
+            with st.spinner('수만 가지 조합을 시뮬레이션하여 최적의 결과를 찾는 중입니다...'):
+                st.success("🎉 최적의 조합을 찾았습니다! (최종 예상 점수: 59.8 / 60 점 만점)")
+                
+                # 가상의 추천 결과 출력 (추후 엔진 연동)
+                st.write("**[AI 추천 드림팀 명단]**")
+                if need_pm and pm_cnt > 0:
+                    st.write(f"- **사책:** 윤석순 외 {pm_cnt-1}명")
+                if need_pe and pe_cnt > 0:
+                    st.write(f"- **분책:** 황흥만, 김진규 등 {pe_cnt}명")
+                if need_pes and pes_cnt > 0:
+                    st.write(f"- **분참:** 김대리, 이사원 등 {pes_cnt}명")
+                
+    else:
+        st.markdown("##### 👥 기술자 직접 선택")
+        personnel_list = ["(선택)", "윤석순", "황흥만", "김진규", "김대리", "이사원"]
+        
+        # 동적 드롭다운 생성 (사책)
+        if need_pm and pm_cnt > 0:
+            st.write("**🔹 사업책임기술인(사책)**")
+            pm_cols = st.columns(pm_cnt)
+            for i in range(pm_cnt):
+                with pm_cols[i]:
+                    st.selectbox(f"사책 {i+1}", personnel_list, key=f"sel_pm_{i}")
+                    
+        # 동적 드롭다운 생성 (분책)
+        if need_pe and pe_cnt > 0:
+            st.write("**🔹 분야별책임기술인(분책)**")
+            pe_cols = st.columns(pe_cnt)
+            for i in range(pe_cnt):
+                with pe_cols[i]:
+                    st.selectbox(f"분책 {i+1}", personnel_list, key=f"sel_pe_{i}")
+
+        # 동적 드롭다운 생성 (분참)
+        if need_pes and pes_cnt > 0:
+            st.write("**🔹 분야별참여기술인(분참)**")
+            pes_cols = st.columns(pes_cnt)
+            for i in range(pes_cnt):
+                with pes_cols[i]:
+                    st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
+                    
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        if st.button("📊 선택된 인원으로 점수 계산하기", type="primary"):
+            with st.spinner('마스터 DB를 분석하여 점수를 계산 중입니다...'):
+                st.write("### 🏆 예상 가채점 결과: 57.4 점 / 60 점 만점")
+                df_result = pd.DataFrame({
+                    "평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"],
+                    "배점": [30, 20, 10, -5],
+                    "획득점수": [27.6, 20.0, 9.8, 0.0],
+                    "비고": ["윤석순 경력 17점", "진행중 0건", "BB- 등급", "해당없음"]
+                })
+                st.dataframe(df_result, use_container_width=True)
 
 # ---------------------------------------------------------
 # [Tab 4] 서류 출력 및 증빙 자동 패키징
