@@ -68,6 +68,9 @@ with tab1:
 # ---------------------------------------------------------
 # [Tab 2] 공고 룰(Rule) 셋업
 # ---------------------------------------------------------
+# ---------------------------------------------------------
+# [Tab 2] 공고 룰(Rule) 셋업
+# ---------------------------------------------------------
 with tab2:
     st.subheader("평가 기준(Rule) 확정")
     rule_option = st.radio(
@@ -81,12 +84,40 @@ with tab2:
     else:
         st.markdown("#### 🔍 AI 파싱 결과 더블체크 (Human-in-the-loop)")
         col_a, col_b = st.columns(2)
+        
         with col_a:
             st.checkbox("정기안전점검 실적 포함 여부", value=True)
-            st.selectbox("최근 실적 인정 기간", ["최근 3년", "최근 5년", "전체"])
+            # 👉 수정 1: 실적 인정 기간 선택지 세분화
+            st.selectbox("최근 실적 인정 기간", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
+            
         with col_b:
-            st.number_input("사업책임기술인 상하수도 보할(%)", min_value=0, max_value=100, value=100)
-            st.number_input("분야별책임기술인 토질지질 보할(%)", min_value=0, max_value=100, value=20)
+            # 👉 수정 2: 보할 유무 선택 및 동적 추가 에디터
+            st.write("**분야별 보할(가중치) 설정**")
+            has_bohal = st.radio("보할(가중치) 적용 여부", ["적용 안 함", "분야별 보할 적용 (직접 설정)"], horizontal=True)
+            
+            if has_bohal == "분야별 보할 적용 (직접 설정)":
+                st.caption("※ 표의 맨 아래 빈칸을 클릭하여 분야명(예: 교량, 터널)을 입력하고 비율을 추가하세요.")
+                
+                # 초기 설정값 (사용자가 마음대로 지우고 덮어쓸 수 있음)
+                initial_bohal_df = pd.DataFrame([
+                    {"전문분야": "상하수도", "비율(%)": 60},
+                    {"전문분야": "토질지질", "비율(%)": 40}
+                ])
+                
+                # 데이터를 자유롭게 추가/수정/삭제할 수 있는 동적 에디터
+                edited_bohal_df = st.data_editor(
+                    initial_bohal_df,
+                    num_rows="dynamic",
+                    use_container_width=True
+                )
+                
+                # 비율 합계 자동 검증 로직
+                total_bohal = edited_bohal_df["비율(%)"].sum()
+                if total_bohal != 100:
+                    st.warning(f"⚠️ 현재 보할 합계: {total_bohal}% (100%로 맞춰주세요)")
+                else:
+                    st.success(f"✅ 합계 100% 완료")
+                    
         st.button("저장 및 룰 확정")
 
 # ---------------------------------------------------------
