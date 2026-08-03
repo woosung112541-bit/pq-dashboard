@@ -86,7 +86,7 @@ with tab2:
             st.selectbox("최근 실적 인정 기간", ["최근 3년", "최근 5년", "전체"])
         with col_b:
             st.number_input("사업책임기술인 상하수도 보할(%)", min_value=0, max_value=100, value=100)
-            st.number_input("분야별책임기술인 토질지질 보할(%)", min, max_value=100, value=20)
+            st.number_input("분야별책임기술인 토질지질 보할(%)", min_value=0, max_value=100, value=20)
         st.button("저장 및 룰 확정")
 
 # ---------------------------------------------------------
