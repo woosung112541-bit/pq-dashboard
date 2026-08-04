@@ -9,10 +9,14 @@ import zipfile
 import PyPDF2  # PDF 텍스트 추출 라이브러리 추가
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload
+
+# 👉 [추가] 가상 메모리(임시 드라이브) 초기화
+if 'uploaded_pdfs' not in st.session_state:
+    st.session_state.uploaded_pdfs = {}
 
 # ==========================================
-# 🔗 [Data Loader] 구글 드라이브 마스터 DB 연동
+# 🔗 [Data Loader] 구글 드라이브 마스터 DB 연동 (읽기 전용 - 에러 안남)
 # ==========================================
 @st.cache_data(ttl=600)
 def load_master_db_from_drive():
@@ -62,7 +66,6 @@ class PQScoringEngine:
             if col_name in self.master_db.columns:
                 names = self.master_db[col_name].dropna().unique().tolist()
                 return ["(선택)"] + names
-        # 김대리 영구 삭제 적용
         return ["(선택)", "윤석순", "황흥만", "김진규", "이사원", "최부장", "박차장 (엑셀 '성명' 열 추가 필요)"]
 
     def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt):
@@ -112,19 +115,19 @@ with tab1:
             st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
             
     with col2:
-        st.subheader("Zone B: 실적 업데이트 (Master DB 연동)")
+        st.subheader("Zone B: 실적 업데이트 (스마트 스캔 및 분류)")
         perf_file = st.file_uploader("기술인/회사 실적증명서(PDF) 업로드", type=['pdf'], key="zone_b")
         
         if perf_file:
             with st.spinner("🔍 AI가 문서 내용을 스캔하여 종류와 주인을 판별 중입니다..."):
                 try:
-                    # 1. PDF 텍스트 추출 (앞 2페이지만 빠르게 스캔)
+                    # 1. PDF 텍스트 추출
                     pdf_reader = PyPDF2.PdfReader(perf_file)
                     extracted_text = ""
                     for page in pdf_reader.pages[:2]: 
                         extracted_text += page.extract_text() or ""
                     
-                    # 2. 스마트 판별 로직 (문서 종류 및 소유자 추출)
+                    # 2. 스마트 판별 로직
                     doc_type = "기타증빙서류"
                     owner = "회사공통"
                     
@@ -145,34 +148,17 @@ with tab1:
                             
                     # 3. 깔끔한 새 파일명 생성
                     new_filename = f"[{doc_type}] {owner}.pdf"
-                    
                     st.info(f"💡 문서 스캔 완료: **{owner}**의 **{doc_type}**로 분류되었습니다.")
                     
-                    # 4. 구글 드라이브 업로드 (사용자 폴더 ID 적용 완료!)
+                    # 4. 구글 에러 방지 -> 시스템 임시 메모리에 저장! (나중에 ZIP 압축할 때 꺼내씀)
                     perf_file.seek(0)
+                    st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
                     
-                    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-                    creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
-                    drive_service = build('drive', 'v3', credentials=creds)
-                    
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(perf_file.getvalue())
-                        tmp_path = tmp.name
-                        
-                    # 👉 핵심 수정 부분: 알려주신 폴더 ID를 지정했습니다.
-                    file_metadata = {
-                        'name': new_filename,
-                        'parents': ['1lFVQ2WXcdPvTxi8v2jCufPUTy6YDPIhc']
-                    } 
-                    
-                    media = MediaFileUpload(tmp_path, mimetype='application/pdf')
-                    uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                    
-                    os.remove(tmp_path)
-                    st.success(f"✅ 구글 드라이브 업로드 완료! (저장된 이름: {new_filename})")
+                    st.success(f"✅ 시스템 메모리 저장 완료! (분류명: {new_filename})")
+                    st.caption("※ 이 파일은 Tab 4에서 최종 ZIP 패키징 시 자동으로 포함됩니다.")
                     
                 except Exception as e:
-                    st.error(f"분석 및 업로드 중 에러 발생: {str(e)}")
+                    st.error(f"분석 중 에러 발생: {str(e)}")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
@@ -190,7 +176,6 @@ with tab2:
     
     st.markdown("### 🔍 세부사항 직접 설정")
     chk_safety = st.checkbox("✅ 정기안전점검 실적 포함 여부", value=True)
-    
     chk_period = st.checkbox("✅ 최근 실적 인정 기간 제한", value=True)
     if chk_period:
         st.selectbox("↳ 인정 기간을 선택하세요", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
@@ -199,9 +184,6 @@ with tab2:
     if chk_bohal:
         initial_bohal_df = pd.DataFrame([{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}])
         edited_bohal_df = st.data_editor(initial_bohal_df, num_rows="dynamic", use_container_width=True)
-        total_bohal = edited_bohal_df["비율(%)"].sum()
-        if total_bohal != 100:
-            st.warning(f"⚠️ 현재 보할 합계: {total_bohal}% (100%로 맞춰주세요)")
 
     st.markdown("---")
     
@@ -223,17 +205,14 @@ with tab2:
     personnel_list = engine.get_personnel_list()
     if assign_mode == "🧑‍🔧 수동 인원 직접 선택":
         if need_pm and pm_cnt > 0:
-            st.write("🔹 **사업책임기술인(사책)**")
             pm_cols = st.columns(pm_cnt)
             for i in range(pm_cnt):
                 with pm_cols[i]: st.selectbox(f"사책 {i+1}", personnel_list, key=f"sel_pm_{i}")
         if need_pe and pe_cnt > 0:
-            st.write("🔹 **분야별책임기술인(분책)**")
             pe_cols = st.columns(pe_cnt)
             for i in range(pe_cnt):
                 with pe_cols[i]: st.selectbox(f"분책 {i+1}", personnel_list, key=f"sel_pe_{i}")
         if need_pes and pes_cnt > 0:
-            st.write("🔹 **분야별참여기술인(분참)**")
             pes_cols = st.columns(pes_cnt)
             for i in range(pes_cnt):
                 with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
@@ -249,7 +228,6 @@ with tab3:
             if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
                 best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(pm_cnt, pe_cnt, pes_cnt)
                 st.success(f"🎉 AI 최적 조합 발견! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
-                st.write("**[추천 드림팀 명단]**")
                 if rec_pm: st.write(f"- **사책:** {', '.join(rec_pm)}")
                 if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
                 if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
@@ -262,11 +240,13 @@ with tab3:
 # --- [Tab 4] 서류 출력 ---
 with tab4:
     st.subheader("최종 출력 및 제출 파일 다운로드")
-    st.info("💡 확정된 명단을 바탕으로 자기평가표가 작성되며, 필요한 증빙 PDF들만 모아 ZIP으로 압축합니다.")
+    st.info("💡 확정된 명단으로 엑셀 서류가 자동 작성되며, Zone B에서 업로드했던 증빙 PDF 파일들이 함께 압축됩니다.")
     
     if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
         with st.spinner("엑셀 서류 작성 및 증빙자료를 수집하여 압축 중입니다..."):
-            time.sleep(2)
+            time.sleep(1)
+            
+            # 1. 엑셀 파일 생성
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
                 df_eval = pd.DataFrame({"평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"], "획득점수": [30.0, 20.0, 10.0, 0.0], "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]})
@@ -274,13 +254,25 @@ with tab4:
                 df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 데이터 없음']})
                 df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
             
+            # 2. ZIP 파일 생성
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # 엑셀 담기
                 zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
-                dummy_pdf = b"%PDF-1.4\n%This is a simulated PDF file for evidence."
-                zip_file.writestr("3_증빙자료/윤석순_상하수도_실적증명서.pdf", dummy_pdf)
-                zip_file.writestr("3_증빙자료/회사_신용평가등급확인서.pdf", dummy_pdf)
+                
+                # 👉 [핵심] Zone B에서 메모리에 올려둔 진짜 PDF들을 그대로 꺼내서 담기!
+                if st.session_state.uploaded_pdfs:
+                    for filename, file_bytes in st.session_state.uploaded_pdfs.items():
+                        zip_file.writestr(f"3_증빙자료/{filename}", file_bytes)
+                else:
+                    zip_file.writestr("3_증빙자료/안내문.txt", "업로드된 증빙 PDF 파일이 없습니다.".encode('utf-8'))
             
             zip_buffer.seek(0)
             st.success("✅ 최종 패키징이 완료되었습니다!")
-            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
+            st.download_button(
+                label="📦 최종 제출 패키지 다운로드 (.zip)", 
+                data=zip_buffer, 
+                file_name="최종_PQ_제출서류_패키지.zip", 
+                mime="application/zip", 
+                type="primary"
+            )
