@@ -6,8 +6,7 @@ import tempfile
 import os
 import time
 import zipfile
-import PyPDF2
-import google.generativeai as genai  # 👈 [추가] 진짜 AI 두뇌 라이브러리
+import google.generativeai as genai  # 👈 진짜 AI 두뇌 라이브러리
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -20,7 +19,7 @@ st.set_page_config(page_title="PQ 자동화 대시보드", layout="wide")
 if 'uploaded_pdfs' not in st.session_state:
     st.session_state.uploaded_pdfs = {}
 
-# 사이드바: AI API 키 입력 (보안을 위해 화면에서 직접 입력받음)
+# 사이드바: AI API 키 입력
 with st.sidebar:
     st.markdown("### 🧠 AI 엔진 설정")
     api_key = st.text_input("Gemini API Key를 입력하세요", type="password")
@@ -139,34 +138,38 @@ with tab1:
             else:
                 with st.spinner("🧠 생성형 AI가 문서를 정독하며 내용을 분석 중입니다..."):
                     try:
-                        # 1. PDF에서 텍스트 뽑아내기
-                        pdf_reader = PyPDF2.PdfReader(perf_file)
-                        extracted_text = ""
-                        for page in pdf_reader.pages[:2]: 
-                            extracted_text += page.extract_text() or ""
+                        # 👉 [핵심 1] 올바른 모델 이름 사용 (1.5-flash)
+                        model = genai.GenerativeModel('gemini-1.5-flash')
                         
-                        # 2. 👉 [핵심] 생성형 AI에게 프롬프트(명령) 내리기
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        prompt = f"""
-                        다음은 건설 기술자 또는 회사의 증빙 서류에서 추출한 텍스트입니다.
-                        이 텍스트를 분석하여 다음 두 가지 정보를 JSON 형식으로만 반환해주세요.
+                        # 👉 [핵심 2] 스캔본(이미지) PDF도 읽을 수 있도록 파일 자체를 통째로 넘김
+                        pdf_part = {
+                            "mime_type": "application/pdf",
+                            "data": perf_file.getvalue()
+                        }
+                        
+                        prompt = """
+                        이 PDF 문서를 분석하여 다음 두 가지 정보를 JSON 형식으로만 반환해주세요.
                         1. doc_type: 문서의 종류 (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나로 분류)
                         2. owner: 문서의 주인이 되는 기술자 이름 (특정 개인의 이름이 없거나 회사 전체 문서인 경우 '회사공통'으로 작성)
                         
-                        [서류 텍스트 시작]
-                        {extracted_text}
-                        [서류 텍스트 끝]
-                        
-                        반드시 {{"doc_type": "문서종류", "owner": "이름"}} 형태의 순수 JSON 문자열만 출력하세요. 마크다운 기호(```json 등)는 쓰지 마세요.
+                        반드시 {"doc_type": "문서종류", "owner": "이름"} 형태의 순수 JSON 문자열만 출력하세요. 마크다운 기호(```json)는 절대 쓰지 마세요.
                         """
                         
-                        response = model.generate_content(prompt)
-                        result_json = json.loads(response.text.strip())
+                        response = model.generate_content([prompt, pdf_part])
+                        
+                        # AI가 혹시라도 마크다운(```json)을 붙여서 대답할 경우를 대비한 안전 장치
+                        result_text = response.text.strip()
+                        if result_text.startswith("```json"):
+                            result_text = result_text[7:-3].strip()
+                        elif result_text.startswith("```"):
+                            result_text = result_text[3:-3].strip()
+                            
+                        result_json = json.loads(result_text)
                         
                         doc_type = result_json.get("doc_type", "기타증빙서류")
                         owner = result_json.get("owner", "회사공통")
                                 
-                        # 3. 새 파일명 생성 및 메모리 저장
+                        # 새 파일명 생성 및 메모리 저장
                         new_filename = f"[{doc_type}] {owner}.pdf"
                         st.info(f"💡 AI 분석 완료: **{owner}**의 **{doc_type}**로 완벽하게 분류되었습니다.")
                         
@@ -176,7 +179,7 @@ with tab1:
                         st.caption("※ 이 파일은 Tab 4에서 최종 ZIP 패키징 시 자동으로 포함됩니다.")
                         
                     except Exception as e:
-                        st.error(f"AI 분석 중 에러 발생: {str(e)}\n(스캔된 이미지 파일이거나 텍스트가 너무 적을 수 있습니다.)")
+                        st.error(f"AI 분석 중 에러 발생: {str(e)}\n(스캔본 해상도가 너무 낮거나 문서 용량이 너무 클 수 있습니다.)")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
