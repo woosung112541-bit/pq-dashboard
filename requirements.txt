@@ -8,3 +8,4 @@ google-auth
 PyPDF2
 
 google-generativeai
+google-auth-oauthlib
