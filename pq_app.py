@@ -1,4 +1,3 @@
-import PyPDF2
 import streamlit as st
 import pandas as pd
 import io
@@ -7,6 +6,7 @@ import tempfile
 import os
 import time
 import zipfile
+import PyPDF2  # PDF 텍스트 추출 라이브러리 추가
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -92,42 +92,15 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] Streamlit 대시보드 UI
 # ==========================================
 st.set_page_config(page_title="PQ 자동화 대시보드", layout="wide")
-# 타이틀 변경
 st.title("PQ 자동화 대시보드")
 st.caption("※ 본 페이지는 로컬 및 클라우드 테스트용 프로토타입입니다.")
 
-# 탭 이름 변경
 tab1, tab2, tab3, tab4 = st.tabs([
     "📥 1. 마스터 DB 관리", 
     "⚙️ 2. 공고문 세부사항 설정", 
     "📊 3. 책임기술자 시뮬레이션 결과", 
     "🖨️ 4. 서류 출력 및 패키징"
 ])
-
-# --- [Tab 1] 마스터 DB 관리 ---
-with tab1:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Zone A: 공고문/지침서 입력")
-        # 여러 파일 업로드 허용 (accept_multiple_files=True)
-        notice_files = st.file_uploader("공고문 등 관련 파일을 드래그 앤 드롭하세요. (다중 첨부 가능)", type=['pdf', 'hwp'], accept_multiple_files=True, key="zone_a")
-        if notice_files:
-            st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
-            
-  import streamlit as st
-import pandas as pd
-import io
-import json
-import tempfile
-import os
-import time
-import zipfile
-import PyPDF2  # 👈 [추가됨] PDF 텍스트 추출 라이브러리
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-
-# ... (Data Loader와 PQScoringEngine 클래스 등 이전 코드는 그대로 유지) ...
 
 # --- [Tab 1] 마스터 DB 관리 ---
 with tab1:
@@ -178,7 +151,7 @@ with tab1:
                     st.info(f"💡 문서 스캔 완료: **{owner}**의 **{doc_type}**로 분류되었습니다.")
                     
                     # 4. 구글 드라이브 업로드 (이름을 바꿔서 올리기)
-                    perf_file.seek(0) # 👈 [핵심] 읽었던 파일 포인터를 다시 처음으로 되돌림
+                    perf_file.seek(0)
                     
                     creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
                     creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
@@ -188,7 +161,6 @@ with tab1:
                         tmp.write(perf_file.getvalue())
                         tmp_path = tmp.name
                         
-                    # 새 파일명 적용! (추후 여기에 특정 폴더 ID를 지정하여 라우팅 가능)
                     file_metadata = {'name': new_filename} 
                     media = MediaFileUpload(tmp_path, mimetype='application/pdf')
                     uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
@@ -199,13 +171,10 @@ with tab1:
                 except Exception as e:
                     st.error(f"분석 및 업로드 중 에러 발생: {str(e)}")
 
-# ... (Tab 2, Tab 3, Tab 4 코드는 이전과 동일하게 유지) ...
-# --- [Tab 2] 공고문 세부사항 설정 (통합 및 레이아웃 개선) ---
+# --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
-    # 1. 평가 항목 시각화 영역 추가
     st.markdown("### 📊 평가 항목 및 배점 기준 시각화 (자기평가표 초안)")
     st.info("💡 Zone A에 업로드된 공고문을 분석하여 추출한 배점 기준표입니다. (제대로 파싱되었는지 시각적으로 확인하세요)")
-    # 자기평가표 양식을 본딴 더미 데이터프레임
     df_eval_criteria = pd.DataFrame({
         "대분류": ["참여기술인", "참여기술인", "유사용역수행실적", "신용도", "가점/감점"],
         "평가항목": ["사업책임기술인", "분야별책임기술인", "최근 3년 실적", "회사 신용평가등급", "영업정지/교육이수"],
@@ -216,9 +185,7 @@ with tab2:
     
     st.markdown("---")
     
-    # 2. 세부사항 직접 설정 (체크박스 토글 형태)
     st.markdown("### 🔍 세부사항 직접 설정")
-    
     chk_safety = st.checkbox("✅ 정기안전점검 실적 포함 여부", value=True)
     
     chk_period = st.checkbox("✅ 최근 실적 인정 기간 제한", value=True)
@@ -235,7 +202,6 @@ with tab2:
 
     st.markdown("---")
     
-    # 3. 필요 인원 및 기술자 배정 (Tab 3에서 가져옴)
     st.markdown("### 👥 필요 인원(T/O) 및 배정 방식 설정")
     col_pm, col_pe, col_pes = st.columns(3)
     with col_pm:
@@ -251,7 +217,6 @@ with tab2:
     st.write("**배정 방식을 선택하세요:**")
     assign_mode = st.radio("배정 방식을 선택하세요:", ["🤖 AI 최적 인원 자동 배정 (최고점 추천)", "🧑‍🔧 수동 인원 직접 선택"], horizontal=True, label_visibility="collapsed")
     
-    # 수동 선택일 경우 드롭다운 노출
     personnel_list = engine.get_personnel_list()
     if assign_mode == "🧑‍🔧 수동 인원 직접 선택":
         if need_pm and pm_cnt > 0:
@@ -270,7 +235,7 @@ with tab2:
             for i in range(pes_cnt):
                 with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
 
-# --- [Tab 3] 시뮬레이션 결과 확인 (결과만 노출) ---
+# --- [Tab 3] 시뮬레이션 결과 확인 ---
 with tab3:
     st.markdown("### 🏆 최종 시뮬레이션 결과")
     st.info("Tab 2에서 설정된 세부사항과 배정 방식을 바탕으로 점수를 계산합니다.")
