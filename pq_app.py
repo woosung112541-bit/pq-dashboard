@@ -128,7 +128,6 @@ with tab1:
                     doc_type = "기타증빙서류"
                     owner = "회사공통"
                     
-                    # (1) 문서 종류 판별
                     if "경력증명서" in extracted_text or "경력확인서" in extracted_text:
                         doc_type = "경력증명서"
                     elif "실적증명서" in extracted_text or "실적" in extracted_text:
@@ -138,7 +137,6 @@ with tab1:
                     elif "교육" in extracted_text or "수료" in extracted_text:
                         doc_type = "교육수료증"
                         
-                    # (2) 문서 주인(이름) 판별 (마스터 DB 명단과 대조하여 찾기)
                     personnel_list = engine.get_personnel_list()
                     for name in personnel_list:
                         if name != "(선택)" and name in extracted_text:
@@ -150,7 +148,7 @@ with tab1:
                     
                     st.info(f"💡 문서 스캔 완료: **{owner}**의 **{doc_type}**로 분류되었습니다.")
                     
-                    # 4. 구글 드라이브 업로드 (이름을 바꿔서 올리기)
+                    # 4. 구글 드라이브 업로드 (사용자 폴더 ID 적용 완료!)
                     perf_file.seek(0)
                     
                     creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
@@ -161,11 +159,13 @@ with tab1:
                         tmp.write(perf_file.getvalue())
                         tmp_path = tmp.name
                         
-                  file_metadata = {
-                      'name': new_filename,
-                      'parents': ['1lFVQ2WXcdPvTxi8v2jCufPUTy6YDPIhc'] # 예: ['1aBcDeFg...']
-                  } 
-                  media = MediaFileUpload(tmp_path, mimetype='application/pdf')
+                    # 👉 핵심 수정 부분: 알려주신 폴더 ID를 지정했습니다.
+                    file_metadata = {
+                        'name': new_filename,
+                        'parents': ['1lFVQ2WXcdPvTxi8v2jCufPUTy6YDPIhc']
+                    } 
+                    
+                    media = MediaFileUpload(tmp_path, mimetype='application/pdf')
                     uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
                     
                     os.remove(tmp_path)
