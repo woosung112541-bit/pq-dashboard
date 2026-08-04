@@ -36,7 +36,7 @@ with st.sidebar:
         st.warning("문서 자동 분석을 위해 API Key가 필요합니다.")
 
 # ==========================================
-# 🔑 [Google Drive 인증] 클라우드 전용 OAuth 2.0 (Secrets 연동)
+# 🔑 [Google Drive 인증]
 # ==========================================
 @st.cache_resource
 def authenticate_google_drive():
@@ -54,14 +54,11 @@ def authenticate_google_drive():
         st.error(f"구글 드라이브 인증 실패 (Secrets 설정을 확인하세요): {e}")
         return None
 
-# 📁 [폴더 자동 생성 로직]
 def get_or_create_folder(drive_service, folder_name, parent_id=None):
     query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id: query += f" and '{parent_id}' in parents"
-    
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     items = results.get('files', [])
-    
     if items: return items[0]['id']
     else:
         folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder'}
@@ -69,21 +66,17 @@ def get_or_create_folder(drive_service, folder_name, parent_id=None):
         folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
         return folder.get('id')
 
-# 📊 마스터 DB 읽어오기
 @st.cache_data(ttl=600)
 def load_master_db_from_drive():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return pd.DataFrame()
-        
         results = drive_service.files().list(
             q="name contains '마스터' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
             fields="files(id, name)"
         ).execute()
         items = results.get('files', [])
-
         if not items: return pd.DataFrame()
-
         file_id = items[0]['id']
         request = drive_service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -164,7 +157,14 @@ with tab1:
                     pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
                     existing_str = ", ".join(map(str, engine.master_db['사업명'].dropna().tolist() if not engine.master_db.empty and '사업명' in engine.master_db.columns else []))
                     
-                    prompt = f"PDF 문서 분석 후 JSON 반환.\n1. doc_type (증명서 종류)\n2. owner (이름, 없으면 '회사공통')\n3. projects (배열). 기존 목록 [{existing_str}] 과 의미상 같은 사업 제외하고 순수 신규만 반환.\n순수 JSON만 출력."
+                    # 👉 [핵심 수정] AI가 엑셀과 완벽히 동일한 칼럼명(키)을 뱉어내도록 명시했습니다!
+                    prompt = f"""
+                    PDF 문서 분석 후 JSON 반환.
+                    1. doc_type (증명서 종류)
+                    2. owner (이름, 없으면 '회사공통')
+                    3. projects (배열). 반드시 "사업명", "시작일", "종료일", "담당업무", "발주처" 라는 5개의 키를 가진 객체 형태로 만들 것. 기존 목록 [{existing_str}] 과 의미상 같은 사업 제외하고 순수 신규만 반환.
+                    순수 JSON만 출력.
+                    """
                     response = get_ai_model().generate_content([prompt, pdf_part])
                     result_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
                     result_json = json.loads(result_text)
@@ -174,7 +174,6 @@ with tab1:
                     projects = result_json.get("projects", [])
                     new_filename = f"[{doc_type}] {owner}.pdf"
                     
-                    # 👉 5TB 대표님 드라이브에 직접 폴더 만들고 꽂기!
                     drive_service = authenticate_google_drive()
                     if not drive_service: raise Exception("구글 드라이브 인증을 먼저 완료해주세요 (Secrets 확인)")
                     
@@ -198,7 +197,6 @@ with tab1:
                         df_new = pd.DataFrame(projects)
                         st.dataframe(df_new, use_container_width=True)
                         
-                        # 👉 [최종 연동] 마스터 엑셀 덮어쓰기 기능!
                         if st.button("💾 신규 실적 마스터 엑셀에 덮어쓰기", type="primary"):
                             with st.spinner("구글 드라이브의 마스터 엑셀 파일을 업데이트하고 있습니다..."):
                                 results = drive_service.files().list(q="name contains '마스터' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false", fields="files(id)").execute()
