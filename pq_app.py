@@ -70,9 +70,7 @@ def get_unique_filename(drive_service, folder_id, base_name):
     query = f"name='{base_name}' and '{folder_id}' in parents and trashed=false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     if not results.get('files', []):
-        return base_name # 중복 없으면 원본 이름 그대로 사용
-    
-    # 중복 시 파일명 뒤에 시/분/초 추가
+        return base_name 
     name, ext = os.path.splitext(base_name)
     timestamp = time.strftime("%H%M%S")
     return f"{name}_v{timestamp}{ext}"
@@ -115,14 +113,14 @@ class PQScoringEngine:
 engine = PQScoringEngine()
 
 def get_ai_model():
-    try: return genai.GenerativeModel('gemini-3.6-flash')
-    except: return genai.GenerativeModel('gemini-1.5-flash')
+    # 가장 안정적인 모델로 고정
+    return genai.GenerativeModel('gemini-1.5-flash')
 
 # ==========================================
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 다중 업로드, 스마트 네이밍, 중복 파일 버전 관리 탑재")
+st.caption("※ 실무 완벽 대응: 다중 업로드, 스마트 네이밍, 서버 과부하 자가치유 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -163,51 +161,65 @@ with tab1:
                 progress_bar = st.progress(0)
                 
                 for idx, perf_file in enumerate(perf_files):
-                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중... (과부하 방지 적용됨)"):
-                        try:
-                            pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
-                            existing_str = ", ".join(map(str, engine.master_db['사업명'].dropna().tolist() if not engine.master_db.empty and '사업명' in engine.master_db.columns else []))
-                            
-                            prompt = f"""
-                            PDF 분석 후 JSON 반환.
-                            1. doc_type (예: 수료증, 경력증명서, 실적증명서)
-                            2. owner (이름, 없으면 '회사공통')
-                            3. specific_detail: 파일을 명확히 구분할 수 있는 핵심 요약어. (경력증명서면 '발급일자(YYYYMMDD)', 수료증이면 '정밀안전진단교량' 등 과정명). 띄어쓰기 없이 15자 이내.
-                            4. projects (배열). 반드시 "사업명", "시작일", "종료일", "담당업무", "발주처" 키 사용. 기존 목록 [{existing_str}] 중복 제외 신규만.
-                            순수 JSON만 출력.
-                            """
-                            response = get_ai_model().generate_content([prompt, pdf_part])
-                            result_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
-                            
-                            doc_type = result_json.get("doc_type", "기타증빙")
-                            owner = result_json.get("owner", "회사공통")
-                            specific_detail = result_json.get("specific_detail", "상세불명")
-                            projects = result_json.get("projects", [])
-                            
-                            base_filename = f"[{doc_type}] {owner}_{specific_detail}.pdf"
-                            owner_folder_id = get_or_create_folder(drive_service, owner, parent_id=archive_id)
-                            final_filename = get_unique_filename(drive_service, owner_folder_id, base_filename)
-                            
-                            perf_file.seek(0)
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                                tmp.write(perf_file.getvalue())
-                                tmp_path = tmp.name
+                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중... (속도 조절 중)"):
+                        
+                        # 💡 [핵심] 좀비 재시도 로직: 429 에러가 나면 60초 쉬고 알아서 다시 시도합니다!
+                        for attempt in range(3): 
+                            try:
+                                pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
+                                existing_str = ", ".join(map(str, engine.master_db['사업명'].dropna().tolist() if not engine.master_db.empty and '사업명' in engine.master_db.columns else []))
                                 
-                            file_metadata = {'name': final_filename, 'parents': [owner_folder_id]} 
-                            media = MediaFileUpload(tmp_path, mimetype='application/pdf')
-                            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                            os.remove(tmp_path)
-                            
-                            if projects: all_extracted_projects.extend(projects)
-                            
-                        except Exception as e: 
-                            st.error(f"'{perf_file.name}' 처리 중 오류: {e}")
-                    
+                                prompt = f"""
+                                PDF 분석 후 JSON 반환.
+                                1. doc_type (예: 수료증, 경력증명서, 실적증명서)
+                                2. owner (이름, 없으면 '회사공통')
+                                3. specific_detail: 파일을 명확히 구분할 수 있는 핵심 요약어. (경력증명서면 '발급일자(YYYYMMDD)', 수료증이면 '정밀안전진단교량' 등). 띄어쓰기 없이 15자 이내.
+                                4. projects (배열). 반드시 "사업명", "시작일", "종료일", "담당업무", "발주처" 키 사용. 기존 목록 [{existing_str}] 중복 제외 신규만.
+                                순수 JSON만 출력.
+                                """
+                                response = get_ai_model().generate_content([prompt, pdf_part])
+                                result_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+                                
+                                doc_type = result_json.get("doc_type", "기타증빙")
+                                owner = result_json.get("owner", "회사공통")
+                                specific_detail = result_json.get("specific_detail", "상세불명")
+                                projects = result_json.get("projects", [])
+                                
+                                base_filename = f"[{doc_type}] {owner}_{specific_detail}.pdf"
+                                owner_folder_id = get_or_create_folder(drive_service, owner, parent_id=archive_id)
+                                final_filename = get_unique_filename(drive_service, owner_folder_id, base_filename)
+                                
+                                perf_file.seek(0)
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                    tmp.write(perf_file.getvalue())
+                                    tmp_path = tmp.name
+                                    
+                                file_metadata = {'name': final_filename, 'parents': [owner_folder_id]} 
+                                media = MediaFileUpload(tmp_path, mimetype='application/pdf')
+                                drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                                os.remove(tmp_path)
+                                
+                                if projects: all_extracted_projects.extend(projects)
+                                
+                                break # 성공하면 3번 시도할 필요 없이 바로 탈출!
+                                
+                            except Exception as e: 
+                                error_msg = str(e)
+                                if "429" in error_msg or "quota" in error_msg.lower():
+                                    if attempt < 2:
+                                        st.toast(f"⚠️ 구글 서버 과부하 감지! 60초 대기 후 '{perf_file.name}' 재시도합니다... ({attempt+1}/3)")
+                                        time.sleep(60) # 확실하게 60초 대기하여 페널티 해제
+                                    else:
+                                        st.error(f"'{perf_file.name}' 처리 실패 (서버 한계 초과): {e}")
+                                else:
+                                    st.error(f"'{perf_file.name}' 처리 중 오류: {e}")
+                                    break
+                        
                     progress_bar.progress((idx + 1) / len(perf_files))
                     
-                    # ⏳ AI 과호흡 방지용 4.5초 강제 휴식 (마지막 파일 제외)
+                    # 다음 파일로 넘어가기 전에 기본적으로 6초 대기 (무료 버전 15 RPM 제한 완벽 방어)
                     if idx < len(perf_files) - 1:
-                        time.sleep(4.5) 
+                        time.sleep(6) 
                 
                 st.session_state.zone_b_projects = pd.DataFrame(all_extracted_projects)
                 st.session_state.zone_b_analyzed = True
