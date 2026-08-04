@@ -113,14 +113,14 @@ class PQScoringEngine:
 engine = PQScoringEngine()
 
 def get_ai_model():
-    # 가장 안정적인 모델로 고정
-    return genai.GenerativeModel('gemini-1.5-flash')
+    # 대표님 지시대로 2026년 최신 안정화 모델로 복구!
+    return genai.GenerativeModel('gemini-3.6-flash')
 
 # ==========================================
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 다중 업로드, 스마트 네이밍, 서버 과부하 자가치유 탑재")
+st.caption("※ 실무 완벽 대응: 다중 업로드, 스마트 네이밍, 서버 과부하 자가치유 탑재 (Gemini 3.6 최신엔진)")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -163,7 +163,7 @@ with tab1:
                 for idx, perf_file in enumerate(perf_files):
                     with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중... (속도 조절 중)"):
                         
-                        # 💡 [핵심] 좀비 재시도 로직: 429 에러가 나면 60초 쉬고 알아서 다시 시도합니다!
+                        # 💡 좀비 재시도 로직: 429 에러가 나면 60초 쉬고 알아서 다시 시도
                         for attempt in range(3): 
                             try:
                                 pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
@@ -201,14 +201,14 @@ with tab1:
                                 
                                 if projects: all_extracted_projects.extend(projects)
                                 
-                                break # 성공하면 3번 시도할 필요 없이 바로 탈출!
+                                break # 성공하면 3번 시도할 필요 없이 탈출
                                 
                             except Exception as e: 
                                 error_msg = str(e)
                                 if "429" in error_msg or "quota" in error_msg.lower():
                                     if attempt < 2:
                                         st.toast(f"⚠️ 구글 서버 과부하 감지! 60초 대기 후 '{perf_file.name}' 재시도합니다... ({attempt+1}/3)")
-                                        time.sleep(60) # 확실하게 60초 대기하여 페널티 해제
+                                        time.sleep(60) 
                                     else:
                                         st.error(f"'{perf_file.name}' 처리 실패 (서버 한계 초과): {e}")
                                 else:
@@ -217,7 +217,6 @@ with tab1:
                         
                     progress_bar.progress((idx + 1) / len(perf_files))
                     
-                    # 다음 파일로 넘어가기 전에 기본적으로 6초 대기 (무료 버전 15 RPM 제한 완벽 방어)
                     if idx < len(perf_files) - 1:
                         time.sleep(6) 
                 
