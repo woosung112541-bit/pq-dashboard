@@ -224,4 +224,162 @@ with tab1:
                         
                         result_text = response.text.strip()
                         if result_text.startswith("```json"): result_text = result_text[7:-3].strip()
-                        elif result_text.startswith("
+                        elif result_text.startswith("```"): result_text = result_text[3:-3].strip()
+                        result_json = json.loads(result_text)
+                        
+                        doc_type = result_json.get("doc_type", "기타증빙서류")
+                        owner = result_json.get("owner", "회사공통")
+                        projects = result_json.get("projects", [])
+                                
+                        new_filename = f"[{doc_type}] {owner}.pdf"
+                        st.info(f"💡 문서 주인 판별 완료: **{owner}**의 **{doc_type}**")
+                        
+                        if projects:
+                            df_new = pd.DataFrame(projects)
+                            st.success(f"✨ AI 필터링 완료! 완전 신규 실적 {len(projects)}건.")
+                            st.dataframe(df_new, use_container_width=True)
+                            st.button("💾 신규 실적 업데이트", type="primary")
+                        else:
+                            st.warning("⚠️ 추출된 실적이 모두 마스터 DB에 있습니다. (전체 패스)")
+                        
+                        perf_file.seek(0)
+                        st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
+                    except Exception as e:
+                        st.error(f"분석 중 에러 발생: {str(e)}")
+
+# --- [Tab 2] 공고문 세부사항 설정 ---
+with tab2:
+    # 상단 요약/스위치 영역
+    col_title, col_toggle = st.columns([7, 3])
+    with col_title:
+        st.markdown("### 📊 공고문 AI 분석 결과 (평가 기준 및 세부사항)")
+    with col_toggle:
+        # 👉 [핵심 업그레이드] 수동 설정 스위치
+        st.write("")
+        manual_override = st.toggle("⚙️ 세부사항 수동 설정", value=False, help="자동 구성된 내용을 강제로 변경하려면 켜세요.")
+
+    # 1. 배점표 렌더링 (항상 보임)
+    if not st.session_state.eval_criteria.empty:
+        st.table(st.session_state.eval_criteria)
+    else:
+        st.info("💡 공고문을 업로드하시면 AI가 아래 표와 설정을 자동으로 완성해 줍니다.")
+        st.table(pd.DataFrame({
+            "대분류": ["참여기술인", "참여기술인", "유사용역수행실적"],
+            "평가항목": ["사업책임기술인", "분야별책임기술인", "최근 3년 실적"],
+            "배점": ["20점", "30점", "30점"],
+            "세부인정기준": ["경력 10점, 실적 10점", "보할 적용", "100% 인정"]
+        }))
+    
+    st.markdown("---")
+
+    # 2. 세부사항 및 인원 설정 렌더링
+    s_settings = st.session_state.auto_settings
+    
+    if not manual_override:
+        # [자동 모드] AI가 읽어온 세팅값을 깔끔한 요약 박스로만 보여줌 (수정 불가)
+        st.success("🤖 AI가 공고문을 기반으로 아래의 평가 룰(Rule)을 자동 세팅했습니다. (변경하려면 우측 상단의 '수동 설정' 스위치를 켜세요)")
+        
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write(f"- **정기안전점검 실적 포함:** {'✅ 포함' if s_settings['has_safety'] else '❌ 미포함'}")
+            st.write(f"- **최근 실적 인정 기간:** {s_settings['period']}")
+            st.write(f"- **필요 인원(T/O):** 사책 {s_settings['pm_cnt']}명 / 분책 {s_settings['pe_cnt']}명 / 분참 {s_settings['pes_cnt']}명")
+        with col_b:
+            st.write("- **분야별 가중치(보할) 적용 기준:**")
+            st.table(pd.DataFrame(s_settings['bohal']))
+            
+        # 백엔드로 넘어갈 최종 변수 세팅
+        final_pm_cnt = s_settings['pm_cnt']
+        final_pe_cnt = s_settings['pe_cnt']
+        final_pes_cnt = s_settings['pes_cnt']
+        
+    else:
+        # [수동 모드] 사용자가 직접 값을 수정할 수 있는 입력폼 활성화 (초깃값은 AI가 세팅한 값)
+        st.warning("⚠️ 수동 설정 모드입니다. 필요에 따라 자동 입력된 값을 수정하세요.")
+        
+        st.markdown("#### 🔍 룰(Rule) 상세 조정")
+        chk_safety = st.checkbox("✅ 정기안전점검 실적 포함 여부", value=s_settings['has_safety'])
+        
+        periods = ["1년", "3년", "5년", "7년", "제한없음"]
+        idx = periods.index(s_settings['period']) if s_settings['period'] in periods else 1
+        sel_period = st.selectbox("↳ 실적 인정 기간", periods, index=idx)
+        
+        st.write("**✅ 분야별 가중치(보할) 직접 설정**")
+        df_bohal = pd.DataFrame(s_settings['bohal']) if s_settings['bohal'] else pd.DataFrame([{"전문분야": "주공종", "비율(%)": 100}])
+        edited_bohal = st.data_editor(df_bohal, num_rows="dynamic", use_container_width=True)
+
+        st.markdown("#### 👥 필요 인원(T/O) 조정")
+        col_pm, col_pe, col_pes = st.columns(3)
+        with col_pm:
+            final_pm_cnt = st.number_input("사책 인원수", min_value=0, max_value=5, value=s_settings['pm_cnt'])
+        with col_pe:
+            final_pe_cnt = st.number_input("분책 인원수", min_value=0, max_value=10, value=s_settings['pe_cnt'])
+        with col_pes:
+            final_pes_cnt = st.number_input("분참 인원수", min_value=0, max_value=10, value=s_settings['pes_cnt'])
+
+    st.markdown("---")
+    st.markdown("### 🧑‍🔧 기술자 배정 (시뮬레이션 대상)")
+    assign_mode = st.radio("배정 방식을 선택하세요:", ["🤖 AI 최적 인원 자동 배정 (최고점 추천)", "🧑‍🔧 수동 인원 직접 선택"], horizontal=True, label_visibility="collapsed")
+    
+    personnel_list = engine.get_personnel_list()
+    if assign_mode == "🧑‍🔧 수동 인원 직접 선택":
+        if final_pm_cnt > 0:
+            pm_cols = st.columns(final_pm_cnt)
+            for i in range(final_pm_cnt):
+                with pm_cols[i]: st.selectbox(f"사책 {i+1}", personnel_list, key=f"sel_pm_{i}")
+        if final_pe_cnt > 0:
+            pe_cols = st.columns(final_pe_cnt)
+            for i in range(final_pe_cnt):
+                with pe_cols[i]: st.selectbox(f"분책 {i+1}", personnel_list, key=f"sel_pe_{i}")
+        if final_pes_cnt > 0:
+            pes_cols = st.columns(final_pes_cnt)
+            for i in range(final_pes_cnt):
+                with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
+
+# --- [Tab 3] 시뮬레이션 결과 확인 ---
+with tab3:
+    st.markdown("### 🏆 최종 시뮬레이션 결과")
+    if st.button("🚀 설정된 세부사항으로 시뮬레이션 실행", type="primary"):
+        with st.spinner('마스터 DB 스캔 및 점수 계산 중...'):
+            time.sleep(1.5)
+            if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
+                best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(final_pm_cnt, final_pe_cnt, final_pes_cnt)
+                st.success(f"🎉 AI 최적 조합 발견! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
+                if rec_pm: st.write(f"- **사책:** {', '.join(rec_pm)}")
+                if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
+                if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
+                st.dataframe(best_score, use_container_width=True)
+            else:
+                manual_score = engine.calculate_manual_score()
+                st.success(f"✅ 수동 배정 계산 완료! (최종 예상 점수: {manual_score['획득점수'].sum()} / 60 점 만점)")
+                st.dataframe(manual_score, use_container_width=True)
+
+# --- [Tab 4] 서류 출력 ---
+with tab4:
+    st.subheader("최종 출력 및 제출 파일 다운로드")
+    if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
+        with st.spinner("엑셀 서류 작성 및 증빙자료를 수집하여 압축 중입니다..."):
+            time.sleep(1)
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                if not st.session_state.eval_criteria.empty:
+                    st.session_state.eval_criteria.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                else:
+                    df_eval = pd.DataFrame({"알림": ["공고문 분석 내용이 없습니다."]})
+                    df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                    
+                df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 데이터 없음']})
+                df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
+            
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
+                if st.session_state.uploaded_pdfs:
+                    for filename, file_bytes in st.session_state.uploaded_pdfs.items():
+                        zip_file.writestr(f"3_증빙자료/{filename}", file_bytes)
+                else:
+                    zip_file.writestr("3_증빙자료/안내문.txt", "업로드된 증빙 PDF 파일이 없습니다.".encode('utf-8'))
+            
+            zip_buffer.seek(0)
+            st.success("✅ 최종 패키징이 완료되었습니다!")
+            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
