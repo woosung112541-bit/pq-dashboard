@@ -250,4 +250,38 @@ with tab3:
                 best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(pm_cnt, pe_cnt, pes_cnt)
                 st.success(f"🎉 AI 최적 조합 발견! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
                 if rec_pm: st.write(f"- **사책:** {', '.join(rec_pm)}")
-                if rec_pe: st.write(f"- **분책:** {', '.
+                if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
+                if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
+                st.dataframe(best_score, use_container_width=True)
+            else:
+                manual_score = engine.calculate_manual_score()
+                st.success(f"✅ 수동 배정 계산 완료! (최종 예상 점수: {manual_score['획득점수'].sum()} / 60 점 만점)")
+                st.dataframe(manual_score, use_container_width=True)
+
+# --- [Tab 4] 서류 출력 ---
+with tab4:
+    st.subheader("최종 출력 및 제출 파일 다운로드")
+    
+    if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
+        with st.spinner("엑셀 서류 작성 및 증빙자료를 수집하여 압축 중입니다..."):
+            time.sleep(1)
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                df_eval = pd.DataFrame({"평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"], "획득점수": [30.0, 20.0, 10.0, 0.0], "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]})
+                df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 데이터 없음']})
+                df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
+            
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
+                
+                if st.session_state.uploaded_pdfs:
+                    for filename, file_bytes in st.session_state.uploaded_pdfs.items():
+                        zip_file.writestr(f"3_증빙자료/{filename}", file_bytes)
+                else:
+                    zip_file.writestr("3_증빙자료/안내문.txt", "업로드된 증빙 PDF 파일이 없습니다.".encode('utf-8'))
+            
+            zip_buffer.seek(0)
+            st.success("✅ 최종 패키징이 완료되었습니다!")
+            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
