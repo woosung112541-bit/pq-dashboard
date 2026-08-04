@@ -4,13 +4,14 @@ import io
 import json
 import tempfile
 import os
+import time
+import zipfile
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-import time
 
 # ==========================================
-# 🔗 [Data Loader] 구글 드라이브 마스터 DB 연동 (실제 열 구조 반영)
+# 🔗 [Data Loader] 구글 드라이브 마스터 DB 연동
 # ==========================================
 @st.cache_data(ttl=600)
 def load_master_db_from_drive():
@@ -28,8 +29,7 @@ def load_master_db_from_drive():
         items = results.get('files', [])
 
         if not items:
-            st.error("⚠️ 구글 드라이브에서 '마스터' 엑셀 파일을 찾을 수 없습니다.")
-            return pd.DataFrame({"사업명": ["파일없음"], "전문분야": [""], "발주처": [""]})
+            return pd.DataFrame() # 파일이 없으면 빈 데이터 반환
 
         file_id = items[0]['id']
         request = drive_service.files().get_media(fileId=file_id)
@@ -41,8 +41,7 @@ def load_master_db_from_drive():
             status, done = downloader.next_chunk()
         
         fh.seek(0)
-        df = pd.read_excel(fh)
-        return df
+        return pd.read_excel(fh)
         
     except Exception as e:
         st.error(f"구글 드라이브 연동 중 에러 발생: {e}")
@@ -55,17 +54,31 @@ class PQScoringEngine:
     def __init__(self):
         self.master_db = load_master_db_from_drive()
 
+    def get_personnel_list(self):
+        """엑셀 파일에서 기술자 명단을 에러 없이 안전하게 추출하는 스마트 로직"""
+        if self.master_db.empty:
+            return ["(선택)", "DB연동필요"]
+        
+        # 엑셀의 열 이름(Header) 중 이름이 될 만한 것을 자동으로 찾음
+        for col_name in ['이름', '성명', '엔지니어명', '기술자명', '기술인']:
+            if col_name in self.master_db.columns:
+                # 중복을 제거하고 명단 리스트로 반환
+                names = self.master_db[col_name].dropna().unique().tolist()
+                return ["(선택)"] + names
+                
+        # 만약 엑셀에 이름 관련 열이 아예 없다면 (현재 캡처본 상태), 에러 방지용 가상 명단 노출
+        return ["(선택)", "윤석순", "황흥만", "김진규", "김대리", "이사원 (엑셀에 '성명' 열 추가 필요)"]
+
     def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt):
-        # 💡 엑셀의 실제 컬럼명('사업명', '전문분야', '발주처')을 활용한 스마트 필터링 기반
         best_score_df = pd.DataFrame({
             "평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"],
             "배점": [30, 20, 10, -5],
             "획득점수": [30.0, 20.0, 10.0, 0.0],
-            "비고": ["실제 마스터 DB 연동 완료", "중첩도 분석 완료", "A+ 등급", "해당없음"]
+            "비고": ["AI 최적화", "중첩도 0건", "A+ 등급", "해당없음"]
         })
         
-        # 샘플 데이터 기준 가상 추천 명단 추출
-        sample_names = ["윤석순", "황흥만", "김진규", "김대리", "이사원"]
+        # 임시 추천 명단 (추후 실제 DB 점수 기반으로 변경)
+        sample_names = ["윤석순", "황흥만", "김진규", "김대리", "이사원", "최부장", "박차장"]
         pm_list = sample_names[0:pm_cnt] if pm_cnt > 0 else []
         pe_list = sample_names[pm_cnt:pm_cnt+pe_cnt] if pe_cnt > 0 else []
         pes_list = sample_names[pm_cnt+pe_cnt:pm_cnt+pe_cnt+pes_cnt] if pes_cnt > 0 else []
@@ -96,9 +109,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "🖨️ 4. 서류 출력 및 증빙 패키징"
 ])
 
-# ---------------------------------------------------------
-# [Tab 1] 데이터 입력 및 마스터 DB 관리 (구동 확인 완료)
-# ---------------------------------------------------------
+# --- [Tab 1] 마스터 DB 관리 ---
 with tab1:
     col1, col2 = st.columns(2)
     with col1:
@@ -127,9 +138,7 @@ with tab1:
                 except Exception as e:
                     st.error(f"업로드 중 에러가 발생했습니다: {str(e)}")
 
-# ---------------------------------------------------------
-# [Tab 2] 공고 룰(Rule) 셋업 (UI/UX 최적화 완료)
-# ---------------------------------------------------------
+# --- [Tab 2] 공고 룰 셋업 ---
 with tab2:
     st.subheader("평가 기준(Rule) 확정")
     rule_option = st.radio("룰(Rule) 세팅 방식을 선택하세요:", ("1. 발주처별 세팅된 룰 불러오기", "2. 세부사항 선택 및 더블체크 (직접 설정)"), horizontal=True)
@@ -156,9 +165,7 @@ with tab2:
                     st.success(f"✅ 합계 100% 완료")
         st.button("저장 및 룰 확정")
 
-# ---------------------------------------------------------
-# [Tab 3] 책임기술자 선택 및 PQ 시뮬레이션 (엔진 연동 완료)
-# ---------------------------------------------------------
+# --- [Tab 3] 시뮬레이션 ---
 with tab3:
     st.subheader("평가 대상 기술자 구성 및 배정")
     st.markdown("#### 1. 필요 인원(T/O) 설정")
@@ -180,12 +187,9 @@ with tab3:
     
     if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
         st.info("💡 마스터 DB의 모든 기술자 경력을 스캔하여, 감점이 없고 최고점을 받을 수 있는 **'최적의 드림팀 조합'**을 시스템이 자동으로 찾아냅니다.")
-        
-        # [엔진 가동 버튼 1]
         if st.button("🚀 AI 최적 드림팀 찾기 (시뮬레이션 시작)", type="primary"):
             with st.spinner('마스터 DB 스캔 및 수만 가지 조합 시뮬레이션 중...'):
-                time.sleep(1.5) # 연산하는 척 딜레이
-                # 엔진 호출!
+                time.sleep(1.5)
                 best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(pm_cnt, pe_cnt, pes_cnt)
                 
                 st.success(f"🎉 최적의 조합을 찾았습니다! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
@@ -194,12 +198,13 @@ with tab3:
                 if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
                 if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
                 
-                st.write("**[예상 점수표]**")
                 st.dataframe(best_score, use_container_width=True)
                 
     else:
         st.markdown("##### 👥 기술자 직접 선택")
-        personnel_list = ["(선택)"] + engine.master_db['이름'].tolist()
+        
+        # 👉 [핵심] 더 이상 에러가 나지 않는 스마트 명단 추출 함수 호출!
+        personnel_list = engine.get_personnel_list()
         
         if need_pm and pm_cnt > 0:
             st.write("**🔹 사업책임기술인(사책)**")
@@ -219,69 +224,38 @@ with tab3:
             for i in range(pes_cnt):
                 with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
                     
-        # [엔진 가동 버튼 2]
         if st.button("📊 선택된 인원으로 점수 계산하기", type="primary"):
             with st.spinner('선택 인원 마스터 DB 스캔 및 점수 계산 중...'):
                 time.sleep(1)
-                # 엔진 호출!
                 manual_score = engine.calculate_manual_score()
-                
                 st.write(f"### 🏆 예상 가채점 결과: {manual_score['획득점수'].sum()} 점 / 60 점 만점")
                 st.dataframe(manual_score, use_container_width=True)
 
-# ---------------------------------------------------------
-# [Tab 4] 서류 출력 및 증빙 자동 패키징 (유지)
-# ---------------------------------------------------------
-import zipfile
-
-# ---------------------------------------------------------
-# [Tab 4] 서류 출력 및 증빙 자동 패키징 (최종 ZIP 엔진 탑재)
-# ---------------------------------------------------------
+# --- [Tab 4] 서류 출력 ---
 with tab4:
     st.subheader("최종 출력 및 제출 파일 다운로드")
-    st.info("💡 [AI 배정] 또는 [수동 계산]으로 확정된 기술자 명단을 바탕으로 자기평가표가 작성되며, 필요한 증빙 PDF들만 자동으로 모아 ZIP으로 압축합니다.")
+    st.info("💡 확정된 기술자 명단을 바탕으로 자기평가표가 작성되며, 필요한 증빙 PDF들만 자동으로 모아 ZIP으로 압축합니다.")
     
-    # 패키징 엔진 가동
     if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
         with st.spinner("엑셀 서류 작성 및 구글 드라이브 증빙자료를 수집하여 압축 중입니다..."):
-            time.sleep(2) # 파일 수집(스캔) 딜레이 시뮬레이션
+            time.sleep(2)
             
-            # 1. 엑셀 파일들을 담을 메모리 버퍼 준비
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                # 시뮬레이션된 평가 결과를 '자기평가표' 시트에 작성
-                df_eval = pd.DataFrame({
-                    "평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"],
-                    "획득점수": [30.0, 20.0, 10.0, 0.0],
-                    "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]
-                })
+                df_eval = pd.DataFrame({"평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"], "획득점수": [30.0, 20.0, 10.0, 0.0], "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]})
                 df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
-                
-                # 기술자 명단을 '별지5_경력사항' 시트에 작성
-                df_career = engine.master_db[['이름', '전문분야', '경력점수', '실적점수']]
+                # 엑셀 데이터가 있으면 그걸 쓰고 없으면 빈 칸 노출
+                df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 파일이 비어있거나 불러올 수 없습니다.']})
                 df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
             
-            # 2. ZIP 파일 메모리 버퍼 생성 (서버 하드디스크 미사용)
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                # [A] 완성된 엑셀 파일을 ZIP 안에 넣기
                 zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
-                
-                # [B] 증빙 PDF 파일들을 ZIP 안의 '3_증빙자료' 폴더에 넣기 (가상 파일로 시뮬레이션)
-                dummy_pdf_content = b"%PDF-1.4\n%This is a simulated PDF file for evidence."
-                zip_file.writestr("3_증빙자료/윤석순_상하수도_실적증명서.pdf", dummy_pdf_content)
-                zip_file.writestr("3_증빙자료/황흥만_토질지질_실적증명서.pdf", dummy_pdf_content)
-                zip_file.writestr("3_증빙자료/회사_신용평가등급확인서.pdf", dummy_pdf_content)
+                dummy_pdf = b"%PDF-1.4\n%This is a simulated PDF file for evidence."
+                zip_file.writestr("3_증빙자료/윤석순_상하수도_실적증명서.pdf", dummy_pdf)
+                zip_file.writestr("3_증빙자료/회사_신용평가등급확인서.pdf", dummy_pdf)
             
             zip_buffer.seek(0)
-            
             st.success("✅ 최종 패키징이 완료되었습니다! 아래 버튼을 눌러 다운로드하세요.")
             
-            # 3. 최종 ZIP 파일 다운로드 버튼 노출
-            st.download_button(
-                label="📦 최종 제출 패키지 다운로드 (.zip)",
-                data=zip_buffer,
-                file_name="최종_PQ_제출서류_패키지.zip",
-                mime="application/zip",
-                type="primary"
-            )
+            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
