@@ -128,11 +128,10 @@ with tab1:
         st.subheader("Zone A: 공고문/지침서 분석")
         notice_files = st.file_uploader("공고문 파일(PDF) 업로드", type=['pdf'], accept_multiple_files=True, key="zone_a")
         if notice_files and api_key and st.button("🧠 공고문 AI 분석 및 평가기준 구성", type="primary"):
-            st.success("✅ 공고문 분석 완료 (Tab 2 세팅됨)") # (기존 로직 유지, 지면상 축약)
+            st.success("✅ 공고문 분석 완료 (Tab 2 세팅됨)")
                         
     with col2:
         st.subheader("Zone B: 실적 업데이트 및 스마트 아카이빙")
-        # 👉 [업그레이드 1] 다중 선택(Multiple files) 활성화!
         perf_files = st.file_uploader("기술인/회사 실적증명서 (여러 파일 한 번에 드래그 가능)", type=['pdf'], accept_multiple_files=True, key="zone_b")
         
         if perf_files and api_key:
@@ -144,14 +143,12 @@ with tab1:
                 archive_id = get_or_create_folder(drive_service, '[증빙자료_아카이브]')
                 progress_bar = st.progress(0)
                 
-                # 👉 [업그레이드 2] 여러 파일을 순회하며 일괄 처리
                 for idx, perf_file in enumerate(perf_files):
-                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중..."):
+                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중... (속도 제한 방지 적용됨)"):
                         try:
                             pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
                             existing_str = ", ".join(map(str, engine.master_db['사업명'].dropna().tolist() if not engine.master_db.empty and '사업명' in engine.master_db.columns else []))
                             
-                            # 👉 [업그레이드 3] AI에게 스마트 네이밍용 '핵심 키워드' 추출 지시
                             prompt = f"""
                             PDF 분석 후 JSON 반환.
                             1. doc_type (예: 수료증, 경력증명서, 실적증명서)
@@ -168,7 +165,6 @@ with tab1:
                             specific_detail = result_json.get("specific_detail", "상세불명")
                             projects = result_json.get("projects", [])
                             
-                            # 👉 [업그레이드 4] 스마트 이름 조합 및 중복 방지 로직 적용
                             base_filename = f"[{doc_type}] {owner}_{specific_detail}.pdf"
                             owner_folder_id = get_or_create_folder(drive_service, owner, parent_id=archive_id)
                             final_filename = get_unique_filename(drive_service, owner_folder_id, base_filename)
@@ -185,16 +181,19 @@ with tab1:
                             
                             if projects: all_extracted_projects.extend(projects)
                             
-                        except Exception as e: st.error(f"'{perf_file.name}' 처리 중 오류: {e}")
+                        except Exception as e: 
+                            st.error(f"'{perf_file.name}' 처리 중 오류: {e}")
                     
                     progress_bar.progress((idx + 1) / len(perf_files))
+                    
+                    # ⏳ [핵심 추가] AI 과호흡(429 에러) 방지용 강제 휴식 (마지막 파일 제외)
+                    if idx < len(perf_files) - 1:
+                        time.sleep(4.5) 
                 
-                # 분석 완료 후 메모리에 저장
                 st.session_state.zone_b_projects = pd.DataFrame(all_extracted_projects)
                 st.session_state.zone_b_analyzed = True
                 st.success(f"📂 총 {len(perf_files)}개의 파일이 스마트 분류(이름 지정 및 중복 회피)되어 업로드되었습니다!")
 
-        # 👉 [업그레이드 5] 분석 완료 상태일 때만 엑셀 덮어쓰기 버튼 노출 (상태 유지)
         if st.session_state.zone_b_analyzed:
             if not st.session_state.zone_b_projects.empty:
                 st.info("✨ **AI 신규 실적 추출 완료 (전체 합산)**")
@@ -219,8 +218,8 @@ with tab1:
                             drive_service.files().update(fileId=file_id, media_body=media).execute()
                             os.remove(tmp_path)
                             
-                            load_master_db_from_drive.clear() # 캐시 초기화
-                            st.session_state.zone_b_analyzed = False # UI 초기화
+                            load_master_db_from_drive.clear()
+                            st.session_state.zone_b_analyzed = False
                             st.session_state.zone_b_projects = pd.DataFrame()
                             st.success(f"🎉 성공! 마스터 엑셀 파일 맨 밑줄에 데이터가 완벽하게 일괄 추가되었습니다!")
                         else:
