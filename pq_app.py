@@ -161,8 +161,11 @@ with tab1:
                         tmp.write(perf_file.getvalue())
                         tmp_path = tmp.name
                         
-                    file_metadata = {'name': new_filename} 
-                    media = MediaFileUpload(tmp_path, mimetype='application/pdf')
+                  file_metadata = {
+                      'name': new_filename,
+                      'parents': ['1lFVQ2WXcdPvTxi8v2jCufPUTy6YDPIhc'] # 예: ['1aBcDeFg...']
+                  } 
+                  media = MediaFileUpload(tmp_path, mimetype='application/pdf')
                     uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
                     
                     os.remove(tmp_path)
