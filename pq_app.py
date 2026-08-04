@@ -129,40 +129,46 @@ with tab1:
             st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
             
     with col2:
-        st.subheader("Zone B: 실적 업데이트 (진짜 AI 스캔)")
+        st.subheader("Zone B: 실적 업데이트 (AI 스캔 및 데이터 추출)")
         perf_file = st.file_uploader("기술인/회사 실적증명서(PDF) 업로드", type=['pdf'], key="zone_b")
         
         if perf_file:
             if not api_key:
                 st.error("👈 왼쪽 사이드바에 Gemini API Key를 먼저 입력해주세요!")
             else:
-                with st.spinner("🧠 생성형 AI가 문서를 정독하며 내용을 분석 중입니다..."):
+                with st.spinner("🧠 AI가 문서를 정독하며 '실적 데이터'를 표로 추출 중입니다..."):
                     try:
-                        # 👉 [핵심] 스캔본(이미지) PDF도 읽을 수 있도록 파일 준비
                         pdf_part = {
                             "mime_type": "application/pdf",
                             "data": perf_file.getvalue()
                         }
                         
+                        # 👉 [핵심] 표 데이터를 통째로 뽑아달라는 초정밀 프롬프트
                         prompt = """
-                        이 PDF 문서를 분석하여 다음 두 가지 정보를 JSON 형식으로만 반환해주세요.
-                        1. doc_type: 문서의 종류 (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나로 분류)
-                        2. owner: 문서의 주인이 되는 기술자 이름 (특정 개인의 이름이 없거나 회사 전체 문서인 경우 '회사공통'으로 작성)
+                        이 PDF 문서를 분석하여 다음 정보를 JSON 형식으로만 반환해주세요.
+                        1. doc_type: 문서의 종류 (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나)
+                        2. owner: 문서의 주인이 되는 기술자 이름 (특정 개인의 이름이 없으면 '회사공통')
+                        3. projects: 문서에 기재된 주요 사업(프로젝트) 실적 목록을 배열(리스트)로 추출하세요. (실적이 없으면 빈 배열 [] 반환)
+                           - 각 프로젝트는 다음 필드를 가져야 합니다: "사업명", "시작일", "종료일", "담당업무", "발주처"
+                           - 내용을 파악할 수 없는 필드는 "-" 로 표기하세요.
                         
-                        반드시 {"doc_type": "문서종류", "owner": "이름"} 형태의 순수 JSON 문자열만 출력하세요. 마크다운 기호(```json)는 절대 쓰지 마세요.
+                        반드시 아래와 같은 형태의 순수 JSON 문자열만 출력하세요. 마크다운 기호(```json)는 절대 쓰지 마세요.
+                        {
+                          "doc_type": "경력증명서",
+                          "owner": "홍길동",
+                          "projects": [
+                            {"사업명": "OO건설공사", "시작일": "2020-01-01", "종료일": "2021-12-31", "담당업무": "사업책임기술인", "발주처": "국토교통부"}
+                          ]
+                        }
                         """
                         
-                        # 👉 [스마트 자동 우회 로직] 최신 3.6 모델 우선 호출, 실패 시 안정적 1.5 모델 호출
                         try:
                             model = genai.GenerativeModel('gemini-3.6-flash')
                             response = model.generate_content([prompt, pdf_part])
-                            used_model = "3.6 Flash"
                         except Exception:
                             model = genai.GenerativeModel('gemini-1.5-flash')
                             response = model.generate_content([prompt, pdf_part])
-                            used_model = "1.5 Flash (안정 버전)"
                         
-                        # AI 응답 텍스트 정제
                         result_text = response.text.strip()
                         if result_text.startswith("```json"):
                             result_text = result_text[7:-3].strip()
@@ -173,18 +179,28 @@ with tab1:
                         
                         doc_type = result_json.get("doc_type", "기타증빙서류")
                         owner = result_json.get("owner", "회사공통")
+                        projects = result_json.get("projects", [])
                                 
-                        # 새 파일명 생성 및 메모리 저장
                         new_filename = f"[{doc_type}] {owner}.pdf"
-                        st.info(f"💡 AI 분석 완료 ({used_model} 모델 적용): **{owner}**의 **{doc_type}**로 완벽하게 분류되었습니다.")
+                        st.info(f"💡 분류 완료: **{owner}**의 **{doc_type}**")
+                        
+                        # 👉 [추가] 추출된 실적 데이터를 화면에 엑셀(Dataframe)처럼 띄워주기
+                        if projects:
+                            st.success(f"총 {len(projects)}건의 실적 데이터를 성공적으로 추출했습니다!")
+                            df_projects = pd.DataFrame(projects)
+                            st.dataframe(df_projects, use_container_width=True)
+                            
+                            st.button("💾 이 실적 데이터를 마스터 DB 엑셀에 업데이트하기", type="primary")
+                            st.caption("※ 현재는 추출 결과 확인용 프로토타입입니다. 실제 마스터 DB 덮어쓰기는 쓰기 권한 연동 후 가능합니다.")
+                        else:
+                            st.warning("문서에서 추출할 사업 실적 데이터가 없습니다.")
                         
                         perf_file.seek(0)
                         st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
-                        st.success(f"✅ 시스템 메모리 저장 완료! (분류명: {new_filename})")
-                        st.caption("※ 이 파일은 Tab 4에서 최종 ZIP 패키징 시 자동으로 포함됩니다.")
+                        st.caption(f"✅ 서류 원본은 최종 ZIP 패키징을 위해 시스템에 임시 보관되었습니다. ({new_filename})")
                         
                     except Exception as e:
-                        st.error(f"AI 분석 중 에러 발생: {str(e)}\n(스캔본 해상도가 너무 낮거나 문서 용량이 너무 클 수 있습니다.)")
+                        st.error(f"AI 분석 중 에러 발생: {str(e)}")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
