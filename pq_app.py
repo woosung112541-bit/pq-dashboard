@@ -222,4 +222,136 @@ with tab1:
                         
                         result_text = response.text.strip()
                         if result_text.startswith("```json"): result_text = result_text[7:-3].strip()
-                        elif result_text.startswith("
+                        elif result_text.startswith("```"): result_text = result_text[3:-3].strip()
+                            
+                        result_json = json.loads(result_text)
+                        
+                        doc_type = result_json.get("doc_type", "기타증빙서류")
+                        owner = result_json.get("owner", "회사공통")
+                        projects = result_json.get("projects", [])
+                                
+                        new_filename = f"[{doc_type}] {owner}.pdf"
+                        st.info(f"💡 문서 주인 판별 완료: **{owner}**의 **{doc_type}**")
+                        
+                        if projects:
+                            df_new = pd.DataFrame(projects)
+                            st.success(f"✨ AI 필터링 완료! 중복을 제외한 완전 신규 실적 {len(projects)}건을 발견했습니다.")
+                            st.dataframe(df_new, use_container_width=True)
+                            st.button("💾 이 신규 실적만 마스터 DB 엑셀에 업데이트", type="primary")
+                        else:
+                            st.warning("⚠️ 추출된 모든 실적이 이미 마스터 DB에 등록되어 있는 사업입니다. (중복 방지 시스템 작동 - 전체 패스됨)")
+                        
+                        perf_file.seek(0)
+                        st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
+                        
+                    except Exception as e:
+                        st.error(f"AI 분석 중 에러 발생: {str(e)}")
+
+# --- [Tab 2] 공고문 세부사항 설정 ---
+with tab2:
+    st.markdown("### 📊 평가 항목 및 배점 기준 시각화 (자기평가표 초안)")
+    
+    # 👉 Zone A에서 파싱한 데이터가 있으면 그걸 띄워주고, 없으면 더미 데이터 띄워주기
+    if not st.session_state.eval_criteria.empty:
+        st.success("Zone A에서 AI가 분석한 공고문 배점표가 성공적으로 연동되었습니다!")
+        st.table(st.session_state.eval_criteria)
+    else:
+        st.info("💡 공고문을 업로드하시면 AI가 이 표를 자동으로 완성해 줍니다. (현재는 기본 양식)")
+        df_eval_dummy = pd.DataFrame({
+            "대분류": ["참여기술인", "참여기술인", "유사용역수행실적", "신용도", "가점/감점"],
+            "평가항목": ["사업책임기술인", "분야별책임기술인", "최근 3년 실적", "회사 신용평가등급", "영업정지/교육이수"],
+            "배점": ["20점", "30점", "30점", "10점", "+1점 / -2점"],
+            "세부인정기준": ["경력 10점, 실적 10점", "보할 적용", "100% 인정", "A- 이상 만점", "교육원 수료 등"]
+        })
+        st.table(df_eval_dummy)
+        
+    st.markdown("---")
+    st.markdown("### 🔍 세부사항 직접 설정")
+    chk_safety = st.checkbox("✅ 정기안전점검 실적 포함 여부", value=True)
+    chk_period = st.checkbox("✅ 최근 실적 인정 기간 제한", value=True)
+    if chk_period:
+        st.selectbox("↳ 인정 기간을 선택하세요", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
+        
+    chk_bohal = st.checkbox("✅ 분야별 가중치(보할) 직접 설정", value=True)
+    if chk_bohal:
+        initial_bohal_df = pd.DataFrame([{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}])
+        st.data_editor(initial_bohal_df, num_rows="dynamic", use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### 👥 필요 인원(T/O) 및 배정 방식 설정")
+    col_pm, col_pe, col_pes = st.columns(3)
+    with col_pm:
+        need_pm = st.checkbox("사책 필요", value=True)
+        pm_cnt = st.number_input("사책 인원수", min_value=1, max_value=5, value=1) if need_pm else 0
+    with col_pe:
+        need_pe = st.checkbox("분책 필요", value=True)
+        pe_cnt = st.number_input("분책 인원수", min_value=1, max_value=10, value=2) if need_pe else 0
+    with col_pes:
+        need_pes = st.checkbox("분참 필요", value=True)
+        pes_cnt = st.number_input("분참 인원수", min_value=1, max_value=10, value=2) if need_pes else 0
+
+    assign_mode = st.radio("배정 방식을 선택하세요:", ["🤖 AI 최적 인원 자동 배정 (최고점 추천)", "🧑‍🔧 수동 인원 직접 선택"], horizontal=True, label_visibility="collapsed")
+    
+    personnel_list = engine.get_personnel_list()
+    if assign_mode == "🧑‍🔧 수동 인원 직접 선택":
+        if need_pm and pm_cnt > 0:
+            pm_cols = st.columns(pm_cnt)
+            for i in range(pm_cnt):
+                with pm_cols[i]: st.selectbox(f"사책 {i+1}", personnel_list, key=f"sel_pm_{i}")
+        if need_pe and pe_cnt > 0:
+            pe_cols = st.columns(pe_cnt)
+            for i in range(pe_cnt):
+                with pe_cols[i]: st.selectbox(f"분책 {i+1}", personnel_list, key=f"sel_pe_{i}")
+        if need_pes and pes_cnt > 0:
+            pes_cols = st.columns(pes_cnt)
+            for i in range(pes_cnt):
+                with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
+
+# --- [Tab 3] 시뮬레이션 결과 확인 ---
+with tab3:
+    st.markdown("### 🏆 최종 시뮬레이션 결과")
+    if st.button("🚀 설정된 세부사항으로 시뮬레이션 실행", type="primary"):
+        with st.spinner('마스터 DB 스캔 및 점수 계산 중...'):
+            time.sleep(1.5)
+            if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
+                best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(pm_cnt, pe_cnt, pes_cnt)
+                st.success(f"🎉 AI 최적 조합 발견! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
+                if rec_pm: st.write(f"- **사책:** {', '.join(rec_pm)}")
+                if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
+                if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
+                st.dataframe(best_score, use_container_width=True)
+            else:
+                manual_score = engine.calculate_manual_score()
+                st.success(f"✅ 수동 배정 계산 완료! (최종 예상 점수: {manual_score['획득점수'].sum()} / 60 점 만점)")
+                st.dataframe(manual_score, use_container_width=True)
+
+# --- [Tab 4] 서류 출력 ---
+with tab4:
+    st.subheader("최종 출력 및 제출 파일 다운로드")
+    if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
+        with st.spinner("엑셀 서류 작성 및 증빙자료를 수집하여 압축 중입니다..."):
+            time.sleep(1)
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                # Tab 2에서 파싱한 진짜 배점표 데이터가 있으면 그걸로 엑셀 만들기!
+                if not st.session_state.eval_criteria.empty:
+                    st.session_state.eval_criteria.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                else:
+                    df_eval = pd.DataFrame({"알림": ["공고문 분석 내용이 없습니다."]})
+                    df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
+                    
+                df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 데이터 없음']})
+                df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
+            
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
+                if st.session_state.uploaded_pdfs:
+                    for filename, file_bytes in st.session_state.uploaded_pdfs.items():
+                        zip_file.writestr(f"3_증빙자료/{filename}", file_bytes)
+                else:
+                    zip_file.writestr("3_증빙자료/안내문.txt", "업로드된 증빙 PDF 파일이 없습니다.".encode('utf-8'))
+            
+            zip_buffer.seek(0)
+            st.success("✅ 최종 패키징이 완료되었습니다!")
+            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
