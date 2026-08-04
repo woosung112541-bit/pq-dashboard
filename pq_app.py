@@ -1,3 +1,4 @@
+import PyPDF2
 import streamlit as st
 import pandas as pd
 import io
@@ -113,26 +114,92 @@ with tab1:
         if notice_files:
             st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
             
+  import streamlit as st
+import pandas as pd
+import io
+import json
+import tempfile
+import os
+import time
+import zipfile
+import PyPDF2  # 👈 [추가됨] PDF 텍스트 추출 라이브러리
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+# ... (Data Loader와 PQScoringEngine 클래스 등 이전 코드는 그대로 유지) ...
+
+# --- [Tab 1] 마스터 DB 관리 ---
+with tab1:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Zone A: 공고문/지침서 입력")
+        notice_files = st.file_uploader("공고문 등 관련 파일을 드래그 앤 드롭하세요. (다중 첨부 가능)", type=['pdf', 'hwp'], accept_multiple_files=True, key="zone_a")
+        if notice_files:
+            st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
+            
     with col2:
         st.subheader("Zone B: 실적 업데이트 (Master DB 연동)")
         perf_file = st.file_uploader("기술인/회사 실적증명서(PDF) 업로드", type=['pdf'], key="zone_b")
+        
         if perf_file:
-            with st.spinner("구글 드라이브에 업로드 중입니다..."):
+            with st.spinner("🔍 AI가 문서 내용을 스캔하여 종류와 주인을 판별 중입니다..."):
                 try:
+                    # 1. PDF 텍스트 추출 (앞 2페이지만 빠르게 스캔)
+                    pdf_reader = PyPDF2.PdfReader(perf_file)
+                    extracted_text = ""
+                    for page in pdf_reader.pages[:2]: 
+                        extracted_text += page.extract_text() or ""
+                    
+                    # 2. 스마트 판별 로직 (문서 종류 및 소유자 추출)
+                    doc_type = "기타증빙서류"
+                    owner = "회사공통"
+                    
+                    # (1) 문서 종류 판별
+                    if "경력증명서" in extracted_text or "경력확인서" in extracted_text:
+                        doc_type = "경력증명서"
+                    elif "실적증명서" in extracted_text or "실적" in extracted_text:
+                        doc_type = "실적증명서"
+                    elif "신용평가" in extracted_text or "신용등급" in extracted_text:
+                        doc_type = "신용평가등급확인서"
+                    elif "교육" in extracted_text or "수료" in extracted_text:
+                        doc_type = "교육수료증"
+                        
+                    # (2) 문서 주인(이름) 판별 (마스터 DB 명단과 대조하여 찾기)
+                    personnel_list = engine.get_personnel_list()
+                    for name in personnel_list:
+                        if name != "(선택)" and name in extracted_text:
+                            owner = name
+                            break
+                            
+                    # 3. 깔끔한 새 파일명 생성
+                    new_filename = f"[{doc_type}] {owner}.pdf"
+                    
+                    st.info(f"💡 문서 스캔 완료: **{owner}**의 **{doc_type}**로 분류되었습니다.")
+                    
+                    # 4. 구글 드라이브 업로드 (이름을 바꿔서 올리기)
+                    perf_file.seek(0) # 👈 [핵심] 읽었던 파일 포인터를 다시 처음으로 되돌림
+                    
                     creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
                     creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
                     drive_service = build('drive', 'v3', credentials=creds)
+                    
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(perf_file.getvalue())
                         tmp_path = tmp.name
-                    file_metadata = {'name': perf_file.name}
+                        
+                    # 새 파일명 적용! (추후 여기에 특정 폴더 ID를 지정하여 라우팅 가능)
+                    file_metadata = {'name': new_filename} 
                     media = MediaFileUpload(tmp_path, mimetype='application/pdf')
                     uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                    
                     os.remove(tmp_path)
-                    st.success(f"✅ 구글 드라이브 업로드 완료! (파일 ID: {uploaded_file.get('id')})")
+                    st.success(f"✅ 구글 드라이브 업로드 완료! (저장된 이름: {new_filename})")
+                    
                 except Exception as e:
-                    st.error(f"업로드 중 에러 발생: {str(e)}")
+                    st.error(f"분석 및 업로드 중 에러 발생: {str(e)}")
 
+# ... (Tab 2, Tab 3, Tab 4 코드는 이전과 동일하게 유지) ...
 # --- [Tab 2] 공고문 세부사항 설정 (통합 및 레이아웃 개선) ---
 with tab2:
     # 1. 평가 항목 시각화 영역 추가
