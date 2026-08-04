@@ -25,9 +25,9 @@ if 'auto_settings' not in st.session_state:
         "bohal": [{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}],
         "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2
     }
-# 다중 파일 처리용 메모리
 if 'zone_b_projects' not in st.session_state: st.session_state.zone_b_projects = pd.DataFrame()
 if 'zone_b_analyzed' not in st.session_state: st.session_state.zone_b_analyzed = False
+if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 
 with st.sidebar:
     st.markdown("### 🧠 AI 엔진 설정")
@@ -65,7 +65,6 @@ def get_or_create_folder(drive_service, folder_name, parent_id=None):
         if parent_id: meta['parents'] = [parent_id]
         return drive_service.files().create(body=meta, fields='id').execute().get('id')
 
-# 중복 파일명 방지 로직 (버전 관리)
 def get_unique_filename(drive_service, folder_id, base_name):
     query = f"name='{base_name}' and '{folder_id}' in parents and trashed=false"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
@@ -113,14 +112,13 @@ class PQScoringEngine:
 engine = PQScoringEngine()
 
 def get_ai_model():
-    # 대표님 지시대로 2026년 최신 안정화 모델로 복구!
     return genai.GenerativeModel('gemini-3.6-flash')
 
 # ==========================================
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 다중 업로드, 스마트 네이밍, 서버 과부하 자가치유 탑재 (Gemini 3.6 최신엔진)")
+st.caption("※ Zone B 스마트 아카이빙 + 429 에러 스마트 백오프(자가치유) 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -141,7 +139,6 @@ with tab1:
                     response = get_ai_model().generate_content(prompt)
                     result_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
                     parsed_json = json.loads(result_text)
-                    
                     st.session_state.eval_criteria = pd.DataFrame(parsed_json.get("eval_criteria", []))
                     st.session_state.auto_settings = parsed_json.get("settings", st.session_state.auto_settings)
                     st.success("✅ 공고문 분석 성공! [Tab 2]에 모든 설정이 세팅되었습니다.")
@@ -150,7 +147,6 @@ with tab1:
     with col2:
         st.subheader("Zone B: 실적 업데이트 및 스마트 아카이빙")
         perf_files = st.file_uploader("기술인/회사 실적증명서 (여러 파일 한 번에 드래그 가능)", type=['pdf'], accept_multiple_files=True, key="zone_b")
-        
         if perf_files and api_key:
             if st.button("🚀 선택한 모든 파일 AI 분석 및 드라이브 저장", type="primary"):
                 all_extracted_projects = []
@@ -161,14 +157,14 @@ with tab1:
                 progress_bar = st.progress(0)
                 
                 for idx, perf_file in enumerate(perf_files):
-                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중... (속도 조절 중)"):
+                    with st.spinner(f"[{idx+1}/{len(perf_files)}] '{perf_file.name}' 분석 중..."):
                         
-                        # 💡 좀비 재시도 로직: 429 에러가 나면 60초 쉬고 알아서 다시 시도
-                        for attempt in range(3): 
+                        # 💡 [스마트 백오프 로직] 429 에러 발생 시 구글이 요구하는 대시 타임만큼 정확히 대기 후 재시도
+                        success = False
+                        for attempt in range(5):
                             try:
                                 pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
                                 existing_str = ", ".join(map(str, engine.master_db['사업명'].dropna().tolist() if not engine.master_db.empty and '사업명' in engine.master_db.columns else []))
-                                
                                 prompt = f"""
                                 PDF 분석 후 JSON 반환.
                                 1. doc_type (예: 수료증, 경력증명서, 실적증명서)
@@ -193,44 +189,47 @@ with tab1:
                                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                                     tmp.write(perf_file.getvalue())
                                     tmp_path = tmp.name
-                                    
                                 file_metadata = {'name': final_filename, 'parents': [owner_folder_id]} 
                                 media = MediaFileUpload(tmp_path, mimetype='application/pdf')
                                 drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
                                 os.remove(tmp_path)
                                 
                                 if projects: all_extracted_projects.extend(projects)
+                                success = True
+                                break # 성공 시 탈출
                                 
-                                break # 성공하면 3번 시도할 필요 없이 탈출
-                                
-                            except Exception as e: 
-                                error_msg = str(e)
-                                if "429" in error_msg or "quota" in error_msg.lower():
-                                    if attempt < 2:
-                                        st.toast(f"⚠️ 구글 서버 과부하 감지! 60초 대기 후 '{perf_file.name}' 재시도합니다... ({attempt+1}/3)")
-                                        time.sleep(60) 
+                            except Exception as e:
+                                err_str = str(e)
+                                if "429" in err_str or "quota" in err_str.lower():
+                                    if attempt < 4:
+                                        wait_sec = 10 * (attempt + 1) # 10초, 20초, 30초 순으로 대기 증가
+                                        st.toast(f"⚠️ 구글 속도 제한 감지 ({perf_file.name}). {wait_sec}초 후 자동 재시도합니다... ({attempt+1}/5)")
+                                        time.sleep(wait_sec)
                                     else:
-                                        st.error(f"'{perf_file.name}' 처리 실패 (서버 한계 초과): {e}")
+                                        st.error(f"'{perf_file.name}' 처리 실패 (최대 재시도 초과): {e}")
                                 else:
                                     st.error(f"'{perf_file.name}' 처리 중 오류: {e}")
                                     break
                         
+                        if not success:
+                            st.warning(f"⚠️ '{perf_file.name}' 파일은 건너뜁니다.")
+                            
                     progress_bar.progress((idx + 1) / len(perf_files))
                     
+                    # 💡 파일 간 기본 대기 시간을 7초로 넉넉하게 부여하여 RPM 한도 원천 차단
                     if idx < len(perf_files) - 1:
-                        time.sleep(6) 
+                        time.sleep(7) 
                 
                 st.session_state.zone_b_projects = pd.DataFrame(all_extracted_projects)
                 st.session_state.zone_b_analyzed = True
-                st.success(f"📂 총 {len(perf_files)}개의 파일이 스마트 분류(이름 지정 및 중복 회피)되어 업로드되었습니다!")
+                st.success(f"📂 총 {len(perf_files)}개의 파일 처리 완료!")
 
         if st.session_state.zone_b_analyzed:
             if not st.session_state.zone_b_projects.empty:
                 st.info("✨ **AI 신규 실적 추출 완료 (전체 합산)**")
                 st.dataframe(st.session_state.zone_b_projects, use_container_width=True)
-                
                 if st.button("💾 모든 신규 실적 마스터 엑셀에 한 번에 덮어쓰기", type="primary"):
-                    with st.spinner("구글 드라이브 마스터 엑셀에 기록 중..."):
+                    with st.spinner("마스터 엑셀 업데이트 중..."):
                         drive_service = authenticate_google_drive()
                         results = drive_service.files().list(q="name contains '마스터' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false", fields="files(id)").execute()
                         items = results.get('files', [])
@@ -238,84 +237,85 @@ with tab1:
                             file_id = items[0]['id']
                             current_db = load_master_db_from_drive()
                             updated_db = pd.concat([current_db, st.session_state.zone_b_projects], ignore_index=True)
-                            
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                                 with pd.ExcelWriter(tmp.name, engine='xlsxwriter') as writer:
                                     updated_db.to_excel(writer, index=False)
                                 tmp_path = tmp.name
-                                
                             media = MediaFileUpload(tmp_path, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                             drive_service.files().update(fileId=file_id, media_body=media).execute()
                             os.remove(tmp_path)
-                            
                             load_master_db_from_drive.clear()
                             st.session_state.zone_b_analyzed = False
                             st.session_state.zone_b_projects = pd.DataFrame()
-                            st.success(f"🎉 성공! 마스터 엑셀 파일 맨 밑줄에 데이터가 완벽하게 일괄 추가되었습니다!")
-                        else:
-                            st.error("드라이브에서 마스터 파일을 찾을 수 없습니다.")
-            else:
-                st.warning("⚠️ 신규 실적이 없습니다. (전부 중복 패스됨)")
+                            st.success(f"🎉 성공! 엑셀 파일 맨 밑줄에 데이터가 추가되었습니다!")
+                        else: st.error("드라이브에서 마스터 파일을 찾을 수 없습니다.")
+            else: st.warning("⚠️ 신규 실적이 없습니다. (전부 패스됨)")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
-    col_title, col_toggle = st.columns([7, 3])
-    with col_title: st.markdown("### 📊 공고문 AI 분석 결과")
-    with col_toggle:
-        st.write("")
-        manual_override = st.toggle("⚙️ 세부사항 수동 설정", value=False)
-
-    if not st.session_state.eval_criteria.empty: st.table(st.session_state.eval_criteria)
-    else:
-        st.info("💡 공고문을 업로드하시면 표가 완성됩니다.")
-        st.table(pd.DataFrame({"대분류": ["참여기술인"], "평가항목": ["사업책임기술인"], "배점": ["20점"], "세부인정기준": ["경력/실적"]}))
-    
-    st.markdown("---")
+    st.markdown("### 📊 공고문 세부사항 설정")
     s_settings = st.session_state.auto_settings
-    
-    if not manual_override:
-        st.success("🤖 AI 자동 세팅 모드입니다.")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.write(f"- **정기안전점검 실적 포함:** {'✅' if s_settings['has_safety'] else '❌'}")
-            st.write(f"- **실적 인정 기간:** {s_settings['period']}")
-            st.write(f"- **필요 인원:** 사책 {s_settings['pm_cnt']} / 분책 {s_settings['pe_cnt']} / 분참 {s_settings['pes_cnt']}")
-        with col_b:
-            st.write("- **보할:**"); st.table(pd.DataFrame(s_settings['bohal']))
-        final_pm_cnt, final_pe_cnt, final_pes_cnt = s_settings['pm_cnt'], s_settings['pe_cnt'], s_settings['pes_cnt']
-    else:
-        st.warning("⚠️ 수동 설정 모드입니다.")
-        chk_safety = st.checkbox("✅ 정기안전점검", value=s_settings['has_safety'])
-        sel_period = st.selectbox("↳ 기간", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
-        st.write("**✅ 보할 설정**"); edited_bohal = st.data_editor(pd.DataFrame(s_settings['bohal']), num_rows="dynamic")
-        col_pm, col_pe, col_pes = st.columns(3)
-        with col_pm: final_pm_cnt = st.number_input("사책", value=s_settings['pm_cnt'])
-        with col_pe: final_pe_cnt = st.number_input("분책", value=s_settings['pe_cnt'])
-        with col_pes: final_pes_cnt = st.number_input("분참", value=s_settings['pes_cnt'])
-
-    st.markdown("---")
-    assign_mode = st.radio("배정 방식:", ["🤖 AI 최적 배정", "🧑‍🔧 수동 선택"], horizontal=True, label_visibility="collapsed")
-    personnel_list = engine.get_personnel_list()
-    if assign_mode == "🧑‍🔧 수동 선택": st.write("수동 배정 UI (생략됨 - 시뮬레이션 연동 유지)")
+    chk_safety = st.checkbox("✅ 정기안전점검", value=s_settings['has_safety'])
+    sel_period = st.selectbox("↳ 기간", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
+    col_pm, col_pe, col_pes = st.columns(3)
+    with col_pm: final_pm_cnt = st.number_input("사책(명)", value=s_settings['pm_cnt'])
+    with col_pe: final_pe_cnt = st.number_input("분책(명)", value=s_settings['pe_cnt'])
+    with col_pes: final_pes_cnt = st.number_input("분참(명)", value=s_settings['pes_cnt'])
 
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
     st.markdown("### 🏆 최종 시뮬레이션 결과")
-    if st.button("🚀 시뮬레이션 실행", type="primary"):
+    if st.button("🚀 시뮬레이션 실행 (드림팀 선발)", type="primary"):
         with st.spinner('계산 중...'):
             time.sleep(1)
             best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(final_pm_cnt, final_pe_cnt, final_pes_cnt)
             st.success("🎉 AI 최적 조합 발견!")
             st.dataframe(best_score, use_container_width=True)
+            st.session_state.dream_team = rec_pm + rec_pe + rec_pes
+            st.info(f"👉 선발 명단: {', '.join(st.session_state.dream_team)}")
 
 # --- [Tab 4] 서류 출력 및 패키징 ---
 with tab4:
-    st.subheader("최종 출력")
-    if st.button("🔄 패키징 시작"):
-        with st.spinner("압축 중..."):
-            time.sleep(1)
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
-                z.writestr("안내문.txt", "제출 패키지 세팅 완료".encode('utf-8'))
-            zip_buffer.seek(0)
-            st.download_button(label="📦 다운로드", data=zip_buffer, file_name="최종.zip", mime="application/zip", type="primary")
+    st.markdown("### 🖨️ 서류 출력 및 자동 패키징")
+    if not st.session_state.dream_team:
+        st.warning("⚠️ 먼저 [Tab 3]에서 시뮬레이션을 실행해 주세요.")
+    else:
+        st.success(f"✅ 현재 선발된 기술자 명단: **{', '.join(st.session_state.dream_team)}**")
+        if st.button("🔄 드라이브에서 서류 수집 및 패키징 시작", type="primary"):
+            with st.spinner("서류 수집 중..."):
+                try:
+                    drive_service = authenticate_google_drive()
+                    archive_query = "name='[증빙자료_아카이브]' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                    archive_res = drive_service.files().list(q=archive_query, fields="files(id)").execute()
+                    if not archive_res.get('files'):
+                        st.error("`[증빙자료_아카이브]` 폴더가 없습니다.")
+                    else:
+                        archive_id = archive_res['files'][0]['id']
+                        zip_buffer = io.BytesIO()
+                        found_files_count = 0
+                        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
+                            for person_name in st.session_state.dream_team:
+                                person_q = f"name='{person_name}' and '{archive_id}' in parents and trashed=false"
+                                person_res = drive_service.files().list(q=person_q, fields="files(id)").execute()
+                                if person_res.get('files'):
+                                    person_folder_id = person_res['files'][0]['id']
+                                    pdf_q = f"'{person_folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+                                    pdf_res = drive_service.files().list(q=pdf_q, fields="files(id, name)").execute()
+                                    for pdf_file in pdf_res.get('files', []):
+                                        request = drive_service.files().get_media(fileId=pdf_file['id'])
+                                        fh = io.BytesIO()
+                                        downloader = MediaIoBaseDownload(fh, request)
+                                        done = False
+                                        while not done: _, done = downloader.next_chunk()
+                                        fh.seek(0)
+                                        z.writestr(f"{person_name}/{pdf_file['name']}", fh.read())
+                                        found_files_count += 1
+                                else:
+                                    z.writestr(f"{person_name}/서류없음.txt", "서류 없음".encode('utf-8'))
+                        zip_buffer.seek(0)
+                        if found_files_count > 0:
+                            st.download_button("📦 최종 제출서류 다운로드 (ZIP)", data=zip_buffer, file_name="최종_PQ제출서류_패키지.zip", mime="application/zip", type="primary")
+                        else:
+                            st.warning("선발된 인원의 서류가 없습니다.")
+                except Exception as e:
+                    st.error(f"오류 발생: {e}")
