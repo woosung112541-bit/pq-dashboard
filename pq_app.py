@@ -6,6 +6,7 @@ import tempfile
 import os
 import time
 import zipfile
+import PyPDF2
 import google.generativeai as genai  
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -18,6 +19,8 @@ st.set_page_config(page_title="PQ 자동화 대시보드", layout="wide")
 
 if 'uploaded_pdfs' not in st.session_state:
     st.session_state.uploaded_pdfs = {}
+if 'eval_criteria' not in st.session_state:
+    st.session_state.eval_criteria = pd.DataFrame() # Zone A에서 뽑아낼 배점표 저장 공간
 
 # 사이드바: AI API 키 입력
 with st.sidebar:
@@ -68,7 +71,7 @@ def load_master_db_from_drive():
         return pd.DataFrame()
 
 # ==========================================
-# 🧠 [Backend Engine] PQ 점수 계산 및 AI 추천 엔진
+# 🧠 [Backend Engine] PQ 점수 계산 엔진
 # ==========================================
 class PQScoringEngine:
     def __init__(self):
@@ -106,6 +109,13 @@ class PQScoringEngine:
 
 engine = PQScoringEngine()
 
+def get_ai_model():
+    """안정성을 위해 3.6 시도 후 1.5로 우회하는 모델 호출 헬퍼 함수"""
+    try:
+        return genai.GenerativeModel('gemini-3.6-flash')
+    except:
+        return genai.GenerativeModel('gemini-1.5-flash')
+
 # ==========================================
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
@@ -122,202 +132,94 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # --- [Tab 1] 마스터 DB 관리 ---
 with tab1:
     col1, col2 = st.columns(2)
+    
+    # ---------------------------------------------------------
+    # 👉 [기능 통합 1] Zone A: 공고문 AI 파싱 뼈대
+    # ---------------------------------------------------------
     with col1:
-        st.subheader("Zone A: 공고문/지침서 입력")
-        notice_files = st.file_uploader("공고문 등 관련 파일을 드래그 앤 드롭하세요. (다중 첨부 가능)", type=['pdf', 'hwp'], accept_multiple_files=True, key="zone_a")
-        if notice_files:
-            st.success(f"총 {len(notice_files)}개의 파일이 업로드 되었습니다! (향후 AI 파싱 로직 연동 예정)")
+        st.subheader("Zone A: 공고문/지침서 분석")
+        notice_files = st.file_uploader("공고문 파일(PDF)을 드래그 앤 드롭하세요.", type=['pdf'], accept_multiple_files=True, key="zone_a")
+        
+        if notice_files and api_key:
+            if st.button("🧠 공고문 AI 분석 및 배점표 자동 생성", type="primary"):
+                with st.spinner("AI가 공고문을 정독하며 자기평가 배점표를 추출하고 있습니다..."):
+                    try:
+                        # 1. PDF 텍스트 추출 (앞 5페이지만 읽어 시간/비용 절약)
+                        notice_text = ""
+                        for file in notice_files:
+                            pdf = PyPDF2.PdfReader(file)
+                            for page in pdf.pages[:5]:
+                                notice_text += page.extract_text() or ""
+                        
+                        # 2. AI에게 배점표 추출 지시
+                        prompt = f"""
+                        다음은 건설엔지니어링(PQ) 공고문/지침서 내용입니다.
+                        이 내용을 분석해서 평가 항목과 배점 기준을 파악한 뒤 JSON 배열 형태로 반환하세요.
+                        배열의 각 항목은 다음 키를 가져야 합니다: "대분류", "평가항목", "배점", "세부인정기준"
+                        
+                        [공고문 내용]
+                        {notice_text}
+                        
+                        반드시 순수 JSON 문자열만 출력하세요. 마크다운(```json)은 쓰지 마세요.
+                        """
+                        model = get_ai_model()
+                        response = model.generate_content(prompt)
+                        
+                        # 응답 텍스트 정제
+                        result_text = response.text.strip()
+                        if result_text.startswith("```json"): result_text = result_text[7:-3].strip()
+                        elif result_text.startswith("```"): result_text = result_text[3:-3].strip()
+                        
+                        parsed_json = json.loads(result_text)
+                        st.session_state.eval_criteria = pd.DataFrame(parsed_json)
+                        
+                        st.success("✅ 공고문 분석 성공! [Tab 2]에 배점표가 세팅되었습니다.")
+                    except Exception as e:
+                        st.error(f"공고문 분석 중 에러 발생: {e}")
+        elif notice_files and not api_key:
+            st.error("👈 왼쪽 사이드바에 API Key를 먼저 입력해주세요!")
             
+    # ---------------------------------------------------------
+    # 👉 [기능 통합 2] Zone B: 실적 업데이트 및 AI 스마트 중복 회피
+    # ---------------------------------------------------------
     with col2:
-        st.subheader("Zone B: 실적 업데이트 (AI 스캔 및 데이터 추출)")
+        st.subheader("Zone B: 실적 업데이트 (AI 스마트 스캔)")
         perf_file = st.file_uploader("기술인/회사 실적증명서(PDF) 업로드", type=['pdf'], key="zone_b")
         
         if perf_file:
             if not api_key:
                 st.error("👈 왼쪽 사이드바에 Gemini API Key를 먼저 입력해주세요!")
             else:
-                with st.spinner("🧠 AI가 문서를 정독하며 '실적 데이터'를 표로 추출 중입니다..."):
+                with st.spinner("🧠 AI가 기존 DB와 대조하며 '순수 신규 실적'만 추출 중입니다..."):
                     try:
-                        pdf_part = {
-                            "mime_type": "application/pdf",
-                            "data": perf_file.getvalue()
-                        }
+                        pdf_part = {"mime_type": "application/pdf", "data": perf_file.getvalue()}
                         
-                        prompt = """
+                        # 기존 사업명 목록 텍스트로 준비
+                        existing_projects_list = []
+                        if not engine.master_db.empty and '사업명' in engine.master_db.columns:
+                            existing_projects_list = engine.master_db['사업명'].dropna().tolist()
+                        existing_str = ", ".join(map(str, existing_projects_list))
+                        
+                        # 👉 AI 스마트 중복 회피 프롬프트
+                        prompt = f"""
                         이 PDF 문서를 분석하여 다음 정보를 JSON 형식으로만 반환해주세요.
-                        1. doc_type: 문서의 종류 (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나)
-                        2. owner: 문서의 주인이 되는 기술자 이름 (특정 개인의 이름이 없으면 '회사공통')
-                        3. projects: 문서에 기재된 주요 사업(프로젝트) 실적 목록을 배열(리스트)로 추출하세요. (실적이 없으면 빈 배열 [] 반환)
-                           - 각 프로젝트는 다음 필드를 가져야 합니다: "사업명", "시작일", "종료일", "담당업무", "발주처"
-                           - 내용을 파악할 수 없는 필드는 "-" 로 표기하세요.
+                        1. doc_type: (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나)
+                        2. owner: 기술자 이름 (없으면 '회사공통')
+                        3. projects: 문서에 기재된 주요 사업 실적 목록 (배열). 키값: "사업명", "시작일", "종료일", "담당업무", "발주처"
                         
-                        반드시 아래와 같은 형태의 순수 JSON 문자열만 출력하세요. 마크다운 기호(```json)는 절대 쓰지 마세요.
-                        {
-                          "doc_type": "경력증명서",
-                          "owner": "홍길동",
-                          "projects": [
-                            {"사업명": "OO건설공사", "시작일": "2020-01-01", "종료일": "2021-12-31", "담당업무": "사업책임기술인", "발주처": "국토교통부"}
-                          ]
-                        }
+                        [🚨 매우 중요한 중복 회피 규칙 🚨]
+                        현재 우리 회사 데이터베이스에 이미 등록된 사업명 목록은 다음과 같습니다:
+                        [{existing_str}]
+                        
+                        PDF에서 찾은 사업 실적 중에서, 위 목록과 '의미상/내용상 같은 사업'이라고 판단되는 것(띄어쓰기, 괄호, 축약어 등의 미세한 차이 포함)은 'projects' 배열에서 무조건 완전히 제외시키세요.
+                        오직 기존 DB에 절대 없는 '완벽한 신규 사업'만 'projects' 배열에 담아서 반환해야 합니다. 신규 사업이 아예 없으면 빈 배열 [] 을 반환하세요.
+                        
+                        반드시 순수 JSON 문자열만 출력하세요. 마크다운(```json)은 쓰지 마세요.
                         """
                         
-                        try:
-                            model = genai.GenerativeModel('gemini-3.6-flash')
-                            response = model.generate_content([prompt, pdf_part])
-                        except Exception:
-                            model = genai.GenerativeModel('gemini-1.5-flash')
-                            response = model.generate_content([prompt, pdf_part])
+                        model = get_ai_model()
+                        response = model.generate_content([prompt, pdf_part])
                         
                         result_text = response.text.strip()
-                        if result_text.startswith("```json"):
-                            result_text = result_text[7:-3].strip()
-                        elif result_text.startswith("```"):
-                            result_text = result_text[3:-3].strip()
-                            
-                        result_json = json.loads(result_text)
-                        
-                        doc_type = result_json.get("doc_type", "기타증빙서류")
-                        owner = result_json.get("owner", "회사공통")
-                        projects = result_json.get("projects", [])
-                                
-                        new_filename = f"[{doc_type}] {owner}.pdf"
-                        st.info(f"💡 분류 완료: **{owner}**의 **{doc_type}**")
-                        
-                        # 👉 [핵심 업그레이드] 마스터 DB와 비교하여 중복 내역 자동 패스 로직
-                        if projects:
-                            existing_projects = []
-                            # 현재 구글 드라이브 마스터 엑셀에 '사업명' 컬럼이 있다면 쭉 가져와서 띄어쓰기 없애고 준비
-                            if not engine.master_db.empty and '사업명' in engine.master_db.columns:
-                                existing_projects = [str(name).replace(" ", "") for name in engine.master_db['사업명'].dropna().tolist()]
-                            
-                            new_projects = []
-                            dup_count = 0
-                            
-                            for p in projects:
-                                # AI가 추출한 사업명도 띄어쓰기 없애고 완벽하게 일치하는지 대조
-                                p_name = str(p.get("사업명", "")).replace(" ", "")
-                                if p_name and p_name in existing_projects:
-                                    dup_count += 1 # 중복 발견 (패스)
-                                else:
-                                    new_projects.append(p) # 완전 신규 (저장 대상)
-                                    
-                            st.success(f"✅ 총 {len(projects)}건 실적 추출 완료! (🔄 중복 패스: {dup_count}건 / ✨ 신규 업데이트 대상: {len(new_projects)}건)")
-                            
-                            if new_projects:
-                                df_new = pd.DataFrame(new_projects)
-                                st.write(f"**✨ 엑셀에 덮어쓸 신규 추가 실적 ({len(new_projects)}건)**")
-                                st.dataframe(df_new, use_container_width=True)
-                                
-                                if st.button("💾 이 신규 실적만 마스터 DB 엑셀에 반영하기", type="primary"):
-                                    st.info("실무 반영 단계에서는 이 버튼을 누르면 구글 드라이브의 원본 엑셀 파일 맨 아랫줄에 이 표가 자동으로 이어붙여집니다. (현재는 중복 필터링 작동 확인용)")
-                            else:
-                                st.warning("⚠️ 추출된 모든 실적이 이미 마스터 DB에 등록되어 있습니다. (전체 패스)")
-                        else:
-                            st.warning("문서에서 추출할 사업 실적 데이터가 없습니다.")
-                        
-                        perf_file.seek(0)
-                        st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
-                        st.caption(f"※ 서류 원본은 최종 ZIP 패키징을 위해 시스템에 임시 보관되었습니다. ({new_filename})")
-                        
-                    except Exception as e:
-                        st.error(f"AI 분석 중 에러 발생: {str(e)}")
-
-# --- [Tab 2] 공고문 세부사항 설정 ---
-with tab2:
-    st.markdown("### 📊 평가 항목 및 배점 기준 시각화 (자기평가표 초안)")
-    df_eval_criteria = pd.DataFrame({
-        "대분류": ["참여기술인", "참여기술인", "유사용역수행실적", "신용도", "가점/감점"],
-        "평가항목": ["사업책임기술인", "분야별책임기술인", "최근 3년 실적", "회사 신용평가등급", "영업정지/교육이수"],
-        "배점": ["20점", "30점", "30점", "10점", "+1점 / -2점"],
-        "세부 인정기준": ["경력 10점, 실적 10점", "보할 적용(상하수도 60, 토질 40)", "100% 인정 (정기안전점검 포함)", "A- 이상 만점", "건설기술교육원 수료 등"]
-    })
-    st.table(df_eval_criteria)
-    st.markdown("---")
-    
-    st.markdown("### 🔍 세부사항 직접 설정")
-    chk_safety = st.checkbox("✅ 정기안전점검 실적 포함 여부", value=True)
-    chk_period = st.checkbox("✅ 최근 실적 인정 기간 제한", value=True)
-    if chk_period:
-        st.selectbox("↳ 인정 기간을 선택하세요", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
-        
-    chk_bohal = st.checkbox("✅ 분야별 가중치(보할) 직접 설정", value=True)
-    if chk_bohal:
-        initial_bohal_df = pd.DataFrame([{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}])
-        edited_bohal_df = st.data_editor(initial_bohal_df, num_rows="dynamic", use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### 👥 필요 인원(T/O) 및 배정 방식 설정")
-    col_pm, col_pe, col_pes = st.columns(3)
-    with col_pm:
-        need_pm = st.checkbox("사책 필요", value=True)
-        pm_cnt = st.number_input("사책 인원수", min_value=1, max_value=5, value=1) if need_pm else 0
-    with col_pe:
-        need_pe = st.checkbox("분책 필요", value=True)
-        pe_cnt = st.number_input("분책 인원수", min_value=1, max_value=10, value=2) if need_pe else 0
-    with col_pes:
-        need_pes = st.checkbox("분참 필요", value=True)
-        pes_cnt = st.number_input("분참 인원수", min_value=1, max_value=10, value=2) if need_pes else 0
-
-    assign_mode = st.radio("배정 방식을 선택하세요:", ["🤖 AI 최적 인원 자동 배정 (최고점 추천)", "🧑‍🔧 수동 인원 직접 선택"], horizontal=True, label_visibility="collapsed")
-    
-    personnel_list = engine.get_personnel_list()
-    if assign_mode == "🧑‍🔧 수동 인원 직접 선택":
-        if need_pm and pm_cnt > 0:
-            pm_cols = st.columns(pm_cnt)
-            for i in range(pm_cnt):
-                with pm_cols[i]: st.selectbox(f"사책 {i+1}", personnel_list, key=f"sel_pm_{i}")
-        if need_pe and pe_cnt > 0:
-            pe_cols = st.columns(pe_cnt)
-            for i in range(pe_cnt):
-                with pe_cols[i]: st.selectbox(f"분책 {i+1}", personnel_list, key=f"sel_pe_{i}")
-        if need_pes and pes_cnt > 0:
-            pes_cols = st.columns(pes_cnt)
-            for i in range(pes_cnt):
-                with pes_cols[i]: st.selectbox(f"분참 {i+1}", personnel_list, key=f"sel_pes_{i}")
-
-# --- [Tab 3] 시뮬레이션 결과 확인 ---
-with tab3:
-    st.markdown("### 🏆 최종 시뮬레이션 결과")
-    
-    if st.button("🚀 설정된 세부사항으로 시뮬레이션 실행", type="primary"):
-        with st.spinner('마스터 DB 스캔 및 점수 계산 중...'):
-            time.sleep(1.5)
-            if assign_mode == "🤖 AI 최적 인원 자동 배정 (최고점 추천)":
-                best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(pm_cnt, pe_cnt, pes_cnt)
-                st.success(f"🎉 AI 최적 조합 발견! (최종 예상 점수: {best_score['획득점수'].sum()} / 60 점 만점)")
-                if rec_pm: st.write(f"- **사책:** {', '.join(rec_pm)}")
-                if rec_pe: st.write(f"- **분책:** {', '.join(rec_pe)}")
-                if rec_pes: st.write(f"- **분참:** {', '.join(rec_pes)}")
-                st.dataframe(best_score, use_container_width=True)
-            else:
-                manual_score = engine.calculate_manual_score()
-                st.success(f"✅ 수동 배정 계산 완료! (최종 예상 점수: {manual_score['획득점수'].sum()} / 60 점 만점)")
-                st.dataframe(manual_score, use_container_width=True)
-
-# --- [Tab 4] 서류 출력 ---
-with tab4:
-    st.subheader("최종 출력 및 제출 파일 다운로드")
-    
-    if st.button("🔄 제출 서류 및 증빙자료 패키징 시작"):
-        with st.spinner("엑셀 서류 작성 및 증빙자료를 수집하여 압축 중입니다..."):
-            time.sleep(1)
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                df_eval = pd.DataFrame({"평가항목": ["사업수행능력", "업무중첩도", "신용도", "감점"], "획득점수": [30.0, 20.0, 10.0, 0.0], "비고": ["AI 자동 작성", "중첩없음", "A+ 등급", "해당없음"]})
-                df_eval.to_excel(writer, sheet_name='1_자기평가표_총괄', index=False)
-                df_career = engine.master_db if not engine.master_db.empty else pd.DataFrame({'알림': ['엑셀 데이터 없음']})
-                df_career.to_excel(writer, sheet_name='2_별지5_참여기술인경력', index=False)
-            
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                zip_file.writestr("1_자동완성_자기평가표.xlsx", excel_buffer.getvalue())
-                
-                if st.session_state.uploaded_pdfs:
-                    for filename, file_bytes in st.session_state.uploaded_pdfs.items():
-                        zip_file.writestr(f"3_증빙자료/{filename}", file_bytes)
-                else:
-                    zip_file.writestr("3_증빙자료/안내문.txt", "업로드된 증빙 PDF 파일이 없습니다.".encode('utf-8'))
-            
-            zip_buffer.seek(0)
-            st.success("✅ 최종 패키징이 완료되었습니다!")
-            st.download_button(label="📦 최종 제출 패키지 다운로드 (.zip)", data=zip_buffer, file_name="최종_PQ_제출서류_패키지.zip", mime="application/zip", type="primary")
+                        if result_text.startswith("```json"): result_text = result_text[7:-3].strip()
+                        elif result_text.startswith("
