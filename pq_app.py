@@ -143,7 +143,6 @@ with tab1:
                             "data": perf_file.getvalue()
                         }
                         
-                        # 👉 [핵심] 표 데이터를 통째로 뽑아달라는 초정밀 프롬프트
                         prompt = """
                         이 PDF 문서를 분석하여 다음 정보를 JSON 형식으로만 반환해주세요.
                         1. doc_type: 문서의 종류 (경력증명서, 실적증명서, 신용평가등급확인서, 교육수료증, 기타증빙서류 중 하나)
@@ -184,20 +183,41 @@ with tab1:
                         new_filename = f"[{doc_type}] {owner}.pdf"
                         st.info(f"💡 분류 완료: **{owner}**의 **{doc_type}**")
                         
-                        # 👉 [추가] 추출된 실적 데이터를 화면에 엑셀(Dataframe)처럼 띄워주기
+                        # 👉 [핵심 업그레이드] 마스터 DB와 비교하여 중복 내역 자동 패스 로직
                         if projects:
-                            st.success(f"총 {len(projects)}건의 실적 데이터를 성공적으로 추출했습니다!")
-                            df_projects = pd.DataFrame(projects)
-                            st.dataframe(df_projects, use_container_width=True)
+                            existing_projects = []
+                            # 현재 구글 드라이브 마스터 엑셀에 '사업명' 컬럼이 있다면 쭉 가져와서 띄어쓰기 없애고 준비
+                            if not engine.master_db.empty and '사업명' in engine.master_db.columns:
+                                existing_projects = [str(name).replace(" ", "") for name in engine.master_db['사업명'].dropna().tolist()]
                             
-                            st.button("💾 이 실적 데이터를 마스터 DB 엑셀에 업데이트하기", type="primary")
-                            st.caption("※ 현재는 추출 결과 확인용 프로토타입입니다. 실제 마스터 DB 덮어쓰기는 쓰기 권한 연동 후 가능합니다.")
+                            new_projects = []
+                            dup_count = 0
+                            
+                            for p in projects:
+                                # AI가 추출한 사업명도 띄어쓰기 없애고 완벽하게 일치하는지 대조
+                                p_name = str(p.get("사업명", "")).replace(" ", "")
+                                if p_name and p_name in existing_projects:
+                                    dup_count += 1 # 중복 발견 (패스)
+                                else:
+                                    new_projects.append(p) # 완전 신규 (저장 대상)
+                                    
+                            st.success(f"✅ 총 {len(projects)}건 실적 추출 완료! (🔄 중복 패스: {dup_count}건 / ✨ 신규 업데이트 대상: {len(new_projects)}건)")
+                            
+                            if new_projects:
+                                df_new = pd.DataFrame(new_projects)
+                                st.write(f"**✨ 엑셀에 덮어쓸 신규 추가 실적 ({len(new_projects)}건)**")
+                                st.dataframe(df_new, use_container_width=True)
+                                
+                                if st.button("💾 이 신규 실적만 마스터 DB 엑셀에 반영하기", type="primary"):
+                                    st.info("실무 반영 단계에서는 이 버튼을 누르면 구글 드라이브의 원본 엑셀 파일 맨 아랫줄에 이 표가 자동으로 이어붙여집니다. (현재는 중복 필터링 작동 확인용)")
+                            else:
+                                st.warning("⚠️ 추출된 모든 실적이 이미 마스터 DB에 등록되어 있습니다. (전체 패스)")
                         else:
                             st.warning("문서에서 추출할 사업 실적 데이터가 없습니다.")
                         
                         perf_file.seek(0)
                         st.session_state.uploaded_pdfs[new_filename] = perf_file.getvalue()
-                        st.caption(f"✅ 서류 원본은 최종 ZIP 패키징을 위해 시스템에 임시 보관되었습니다. ({new_filename})")
+                        st.caption(f"※ 서류 원본은 최종 ZIP 패키징을 위해 시스템에 임시 보관되었습니다. ({new_filename})")
                         
                     except Exception as e:
                         st.error(f"AI 분석 중 에러 발생: {str(e)}")
