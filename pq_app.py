@@ -27,6 +27,8 @@ if 'auto_settings' not in st.session_state:
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
+# 💡 [신규] 최종 상세 점수표를 저장할 메모리
+if 'final_pq_score_table' not in st.session_state: st.session_state.final_pq_score_table = pd.DataFrame()
 
 with st.sidebar:
     st.markdown("### 🧠 AI 엔진 설정")
@@ -54,14 +56,11 @@ def authenticate_google_drive():
         st.error(f"구글 드라이브 인증 실패: {e}")
         return None
 
-# 💡 [핵심 수정] 무조건 파일을 찾아내는 똑똑한 마스터 DB 로더
 @st.cache_data(ttl=300)
 def load_master_db_from_drive():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return pd.DataFrame()
-        
-        # 확장자(MIME) 제한을 풀고 이름에 '마스터'가 들어간 파일 탐색
         results = drive_service.files().list(
             q="name contains '마스터' and trashed=false",
             fields="files(id, name, mimeType)"
@@ -69,13 +68,12 @@ def load_master_db_from_drive():
         items = results.get('files', [])
         
         if not items:
-            load_master_db_from_drive.clear() # 못 찾으면 캐시(헛된 기억) 삭제
+            load_master_db_from_drive.clear()
             return pd.DataFrame()
         
         file_id = items[0]['id']
         mime_type = items[0].get('mimeType', '')
         
-        # 구글 스프레드시트로 임의 변환된 경우 엑셀 포맷으로 강제 내보내기(Export)
         if mime_type == 'application/vnd.google-apps.spreadsheet':
             request = drive_service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         else:
@@ -88,13 +86,12 @@ def load_master_db_from_drive():
         fh.seek(0)
         
         df = pd.read_excel(fh)
-        if df.empty:
-            load_master_db_from_drive.clear() # 파일이 비어있어도 캐시 삭제
+        if df.empty: load_master_db_from_drive.clear()
         return df
         
     except Exception as e:
         st.error(f"마스터 DB 다운로드/읽기 오류: {e}")
-        load_master_db_from_drive.clear() # 에러 나면 캐시 즉시 삭제
+        load_master_db_from_drive.clear()
         return pd.DataFrame()
 
 def get_all_pdfs_recursively(drive_service, folder_id, depth=0):
@@ -155,37 +152,41 @@ def get_ai_model():
     return genai.GenerativeModel('gemini-3.6-flash')
 
 # ==========================================
-# 🧠 [Backend Engine] AI 다이렉트 시뮬레이션 엔진
+# 🧠 [Backend Engine] AI 다이렉트 100점 만점 시뮬레이션 엔진
 # ==========================================
 class PQScoringEngine:
     def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text):
-        # 💡 [핵심 수정] 시뮬레이션 버튼을 누르는 즉시 마스터 DB를 실시간으로 가져옵니다!
         master_db = load_master_db_from_drive()
         if master_db.empty:
-            st.error("❌ 구글 드라이브에서 '마스터'라는 이름이 포함된 엑셀 파일을 찾을 수 없습니다. 드라이브에 파일이 있는지 확인해 주세요.")
+            st.error("❌ 구글 드라이브에서 '마스터'라는 이름이 포함된 엑셀 파일을 찾을 수 없습니다.")
             return pd.DataFrame(), [], [], []
             
         db_csv = master_db.to_csv(index=False)
+        
+        # 💡 [핵심] 최종 점수표(100점 만점) 양식에 맞춘 프롬프트 업그레이드
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
-        아래 [공고문 세부기준]과 [엔지니어 실적 Master DB]를 분석하여, PQ 총점이 가장 높은 최적의 '드림팀'을 선발하세요.
+        아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여, 100점 만점 기준의 최종 PQ 점수 산출표와 최적의 '드림팀' 명단을 선발하세요. (단, 가격 점수는 제외하고 서류/실적 점수만 산출합니다.)
 
         [평가 핵심 지침]
-        1. 기간 필터링: 공고 기간이 3년일 경우, 현재(2026년) 기준으로 정확히 2025, 2024, 2023년도의 실적만 유효한 것으로 필터링하세요.
-        2. 공고문 특화 기준 적용: 특정 법령 위주인지, 특정 분야 가점이 있는지 공고문 텍스트에서 파악하여 DB 점수에 반영하세요.
-        3. 업무중첩도 감점 반영하여 총점이 가장 높은 조합을 찾으세요.
+        1. 기간 필터링: 공고 기간(예: 3년)을 2026년 기준으로 정확히 환산하여 유효 실적만 필터링하세요.
+        2. 특이 기준 적용: 특정 법령(시안법 등), 특정 분야 가점 등 공고문 내의 모든 세부 규칙을 빠짐없이 DB 실적 점수에 반영하세요.
+        3. 전체 항목 평가: 공고문에 명시된 '참여기술인', '유사용역수행실적', '신용도(재정상태/업무정지)', '기술개발및투자실적', '업무중첩도', '가점', '감점' 등 모든 항목의 배점을 파악하고, 이에 맞춘 획득 점수와 구체적인 '점수계산근거'를 작성하세요.
         4. 요구 인원: 사업책임(PM) {pm_cnt}명, 분야책임(PE) {pe_cnt}명, 분야참여(PES) {pes_cnt}명 선발.
 
-        [공고문 세부기준 텍스트]
-        {notice_text[:3000]} 
+        [공고문 전체 텍스트]
+        {notice_text[:5000]} 
 
         [엔지니어 실적 Master DB (CSV 형식)]
         {db_csv}
 
-        위 데이터를 종합적으로 연산하여, 선발된 인원 조합과 점수 산출 내역을 아래 JSON 포맷으로만 반환하세요.
+        분석 결과를 오직 아래 JSON 포맷으로만 반환하세요.
         {{
-            "best_score_df": [
-                {{"평가항목": "사업책임기술자", "배점": 30, "획득점수": 29.5, "비고": "이름 (가점 반영)"}}
+            "pq_score_table": [
+                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 20.0, "점수계산근거": "[윤석순] 인정일수 1,200일 이상 (만점)"}},
+                {{"대분류": "신용도", "평가항목": "점검진단 실시결과", "배점": 4, "획득점수": 4.0, "점수계산근거": "불량 0건, 매우불량 0건"}},
+                {{"대분류": "업무중첩도", "평가항목": "책임기술자", "배점": 6, "획득점수": 6.0, "점수계산근거": "[윤석순] 중복 잔여과업기간 0개월"}}
+                // ... 공고문에 명시된 모든 항목에 대해 위 형식으로 작성하여 총점 100점이 되도록 구성할 것 (가/감점 포함)
             ],
             "pm": ["이름1"],
             "pe": ["이름2", "이름3"],
@@ -198,7 +199,8 @@ class PQScoringEngine:
             response = model.generate_content(prompt)
             result_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
             parsed = json.loads(result_text)
-            df = pd.DataFrame(parsed.get("best_score_df", []))
+            
+            df = pd.DataFrame(parsed.get("pq_score_table", []))
             return df, parsed.get("pm", []), parsed.get("pe", []), parsed.get("pes", [])
         except Exception as e:
             st.error(f"AI 연산 중 오류 발생: {e}")
@@ -210,7 +212,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 공고문 특이사항 추출 + 스마트 DB 스캐너 탑재")
+st.caption("※ 실무 완벽 대응: 공고문 특이사항 추출 + 100점 만점 상세 산출표 생성기")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -226,18 +228,19 @@ with tab1:
                     notice_text = ""
                     for file in notice_files:
                         pdf = PyPDF2.PdfReader(file)
-                        for page in pdf.pages[:7]: notice_text += page.extract_text() or ""
+                        # 평가 기준이 뒷단에 있을 수 있으므로 더 넉넉하게 페이지를 읽어옵니다.
+                        for page in pdf.pages[:15]: notice_text += page.extract_text() or ""
                     
                     st.session_state.notice_text = notice_text
                     
                     prompt = f"""
                     건설엔지니어링 PQ 공고문 분석 후 순수 JSON만 반환하세요.
-                    1. eval_criteria: 배점표 배열
+                    1. eval_criteria: 배점표 배열 (대분류, 평가항목, 배점, 세부인정기준 등)
                     2. settings: {{ 
                         has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int),
                         extra_settings: {{ "항목명": "내용" }}
                     }}
-                    * 중요: extra_settings에는 위 정해진 항목 외에 공고문에 명시된 독특한 가점/감점 기준, 지역 가점, 특정 법령(시안법 등) 우대, 신용도 배점 기준 등 모든 세부/특이사항을 자유롭게 다수 추출하여 키-값 쌍으로 담으세요.
+                    * 중요: extra_settings에는 공고문에 명시된 독특한 가점/감점 기준, 지역 가점, 특정 법령 우대, 신용도 배점 기준 등 모든 세부/특이사항을 자유롭게 추출하세요.
                     공고문: {notice_text}
                     """
                     response = get_ai_model().generate_content(prompt)
@@ -327,21 +330,32 @@ with tab2:
 
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
-    st.markdown("### 🏆 최종 시뮬레이션 및 드림팀 선발")
-    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행", type="primary"):
+    st.markdown("### 🏆 최종 시뮬레이션 및 평가 점수 산출")
+    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (최종 점수표 생성)", type="primary"):
         if not st.session_state.notice_text:
             st.warning("⚠️ [Tab 1]에서 공고문을 먼저 업로드해야 해당 기준에 맞는 연산이 가능합니다!")
         else:
-            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 최적의 조합을 연산 중입니다...'):
-                best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
+            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 100점 만점 기준의 최종 점수 산출표를 작성 중입니다... (약 15초 소요)'):
+                best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
                     final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
                 )
                 
-                if not best_score.empty:
-                    st.success("🎉 AI 최적 조합 산출 완료!")
-                    st.dataframe(best_score, use_container_width=True)
+                if not best_score_df.empty:
+                    st.success("🎉 AI 최종 점수 산출 완료!")
+                    
+                    # 💡 총점 계산 로직 추가
+                    total_allocated = best_score_df['배점'].sum()
+                    total_earned = best_score_df['획득점수'].sum()
+                    
+                    col1, col2 = st.columns(2)
+                    col1.metric("총 배점 (가격 제외)", f"{total_allocated:g}점")
+                    col2.metric("최종 획득 점수", f"{total_earned:g}점")
+                    
+                    st.dataframe(best_score_df, use_container_width=True)
+                    st.session_state.final_pq_score_table = best_score_df
+                    
                     st.session_state.dream_team = rec_pm + rec_pe + rec_pes
-                    st.info(f"👉 **최종 선발 명단:** {', '.join(st.session_state.dream_team)}")
+                    st.info(f"👉 **선발된 드림팀 명단:** {', '.join(st.session_state.dream_team)}")
 
 # --- [Tab 4] 서류 출력 및 패키징 ---
 with tab4:
@@ -366,6 +380,13 @@ with tab4:
                         folder_map = get_all_subfolders_map(drive_service, archive_id)
                         
                         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
+                            # 💡 생성된 점수표도 엑셀로 저장하여 패키지에 포함!
+                            if not st.session_state.final_pq_score_table.empty:
+                                excel_buffer = io.BytesIO()
+                                with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                                    st.session_state.final_pq_score_table.to_excel(writer, index=False, sheet_name='최종점수표')
+                                z.writestr("0_최종_PQ평가_산출표.xlsx", excel_buffer.getvalue())
+                                
                             for person_name in st.session_state.dream_team:
                                 if person_name in folder_map:
                                     person_folder_id = folder_map[person_name]
@@ -390,7 +411,7 @@ with tab4:
                         
                         zip_buffer.seek(0)
                         if found_files_count > 0:
-                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF를 찾아 압축했습니다.")
+                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF와 최종 점수 산출표를 찾아 압축했습니다.")
                             st.download_button("📦 최종 제출서류 패키지 다운로드 (ZIP)", data=zip_buffer, file_name="최종_PQ제출서류_패키지.zip", mime="application/zip", type="primary")
                         else: st.warning("선발된 인원에 해당하는 PDF 서류를 찾지 못했습니다.")
                 except Exception as e: st.error(f"서류 패키징 중 오류 발생: {e}")
