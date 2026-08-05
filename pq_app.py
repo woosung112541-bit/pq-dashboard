@@ -89,7 +89,6 @@ def load_master_db_from_drive():
         return df
         
     except Exception as e:
-        st.error(f"마스터 DB 다운로드/읽기 오류: {e}")
         load_master_db_from_drive.clear()
         return pd.DataFrame()
 
@@ -132,7 +131,6 @@ def scan_drive_archive_cached():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return {}
-        # 💡 [변경] 최상위 폴더 타겟을 '기술인'으로 변경!
         q_arch = "name='기술인' and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res_arch = drive_service.files().list(q=q_arch, fields="files(id)").execute()
         if not res_arch.get('files'): return {}
@@ -148,6 +146,24 @@ def scan_drive_archive_cached():
         return archive_status
     except Exception: return {"시스템 스캔 오류 (새로고침을 눌러주세요)": []}
 
+# 💡 [신규] '작성대상' 폴더 내부의 공고 리스트(하위 폴더)를 가져오는 함수
+def get_target_project_folders(drive_service):
+    try:
+        # 1. '작성대상' 폴더 찾기
+        q = "name='작성대상' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        res = drive_service.files().list(q=q, fields="files(id)").execute()
+        items = res.get('files', [])
+        if not items: return {}
+        
+        target_id = items[0]['id']
+        
+        # 2. 그 안의 프로젝트(공고) 폴더들 목록 가져오기
+        q_sub = f"'{target_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        res_sub = drive_service.files().list(q=q_sub, fields="files(id, name)").execute()
+        return {f['name']: f['id'] for f in res_sub.get('files', [])}
+    except Exception as e:
+        return {}
+
 def get_ai_model():
     return genai.GenerativeModel('gemini-3.6-flash')
 
@@ -162,25 +178,29 @@ class PQScoringEngine:
             return pd.DataFrame(), [], [], []
             
         db_csv = master_db.to_csv(index=False)
-        
-        # 💡 [변경] 현재 드라이브 '기술인' 폴더에 존재하는 실제 인물 명단 추출
         available_engineers = list(scan_drive_archive_cached().keys())
         engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
         
-        # 💡 [핵심] 신용도 고정 및 만점 환각 방지 지시 프롬프트
+        # 💡 [핵심] '자기평가서' 양식을 100% 미러링하라는 강력한 지시 프롬프트 추가
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
-        아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여, 100점 만점 기준의 최종 PQ 점수 산출표와 최적의 '드림팀' 명단을 선발하세요. (가격 점수는 제외)
+        아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여 최적의 '드림팀'을 선발하고, 평가 점수 산출표를 작성하세요.
 
-        [절대 준수 규칙]
-        1. **후보군 제한:** 당신은 반드시 다음 명단에 있는 기술자들 중에서만 인원을 선발해야 합니다: [{engineers_str}]. 이 명단에 없는 가상의 인물을 지어내면 안 됩니다.
-        2. **기업 신용도 고정:** 당사의 신용평가등급은 **'BB-'** 입니다. 공고문의 신용도(재정상태 건실도 등) 배점표를 확인하여, BB-에 해당하는 실제 점수를 반드시 깎아서(감점 반영하여) 계산하세요. 무조건 만점을 주면 안 됩니다.
-        3. **엄격한 실적 계산 (만점 환각 방지):** 제공된 마스터 DB CSV의 '인정일수', '건수', '금액' 등을 철저히 분석하세요. 기준에 미달하면 임의로 만점을 주지 말고, 공고문 산식에 따라 반드시 점수를 깎아야 합니다.
-        4. 기간 필터링: 공고 기간(예: 3년)을 2026년 기준으로 환산하여 유효 실적만 인정하세요.
-        5. 요구 인원: 사업책임(PM) {pm_cnt}명, 분야책임(PE) {pe_cnt}명, 분야참여(PES) {pes_cnt}명 선발.
+        [★★★★★ 절대 준수 최우선 규칙: 자기평가서 완벽 미러링]
+        제공된 공고문 텍스트 내에는 '자기평가서'라는 제출 양식이 존재합니다. 
+        반환하는 JSON의 "pq_score_table"은 **반드시 이 '자기평가서'의 행(Row)과 열(Column) 항목명을 100% 동일하게 복제**하여 작성해야 합니다.
+        심사관이 보았을 때 "자기평가서 양식에 점수와 계산근거만 정확하게 채워 넣었구나!"라고 느낄 수 있어야 합니다. 
+        점수를 계산할 때는 '세부 점수 기준'의 산식을 엄격히 적용하세요.
+
+        [평가 핵심 지침]
+        1. 후보군 제한: 반드시 다음 명단에 있는 기술자들 중에서만 선발하세요: [{engineers_str}].
+        2. 기업 신용도 고정: 당사의 신용평가등급은 'BB-' 입니다. 세부 점수 기준에서 BB-에 해당하는 실제 점수를 감점 적용하세요. 무조건 만점을 주면 안 됩니다.
+        3. 엄격한 실적 계산: 제공된 DB의 '인정일수', '건수', '금액' 등을 철저히 계산하여 기준 미달 시 반드시 공고문 산식에 따라 감점 처리하세요.
+        4. 기간 필터링: 공고 기간을 2026년 기준으로 환산하여 유효 실적만 인정하세요.
+        5. 요구 인원: 사책(PM) {pm_cnt}명, 분책(PE) {pe_cnt}명, 분참(PES) {pes_cnt}명.
 
         [공고문 전체 텍스트]
-        {notice_text[:5000]} 
+        {notice_text[:7000]} 
 
         [엔지니어 실적 Master DB (CSV 형식)]
         {db_csv}
@@ -188,8 +208,8 @@ class PQScoringEngine:
         분석 결과를 오직 아래 JSON 포맷으로만 반환하세요.
         {{
             "pq_score_table": [
-                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 17.5, "점수계산근거": "[이름] 인정일수 부족으로 감점"}},
-                {{"대분류": "신용도", "평가항목": "재정상태 건실도", "배점": 3, "획득점수": 1.5, "점수계산근거": "신용등급 BB- 반영"}}
+                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 17.5, "점수계산근거": "[이름] 인정일수 1000일 적용, 기준 미달로 감점"}},
+                {{"대분류": "신용도", "평가항목": "재정상태 건실도", "배점": 3, "획득점수": 1.5, "점수계산근거": "신용등급 BB- 적용"}}
             ],
             "pm": ["이름1"],
             "pe": ["이름2", "이름3"],
@@ -215,7 +235,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: '기술인' 폴더 한정 탐색 + 신용도 BB- 고정 + 실점수 산출")
+st.caption("※ 듀얼 입력 모드(드라이브 연동) + 자기평가서 100% 미러링 엔진 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -224,33 +244,69 @@ with tab1:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Zone A: 공고문/지침서 분석")
-        notice_files = st.file_uploader("공고문 파일(PDF) 업로드", type=['pdf'], accept_multiple_files=True, key="zone_a")
-        if notice_files and api_key and st.button("🧠 공고문 AI 분석 및 평가기준 구성", type="primary"):
-            with st.spinner("AI가 공고문을 정독하며 숨은 특이사항을 찾아내고 있습니다..."):
-                try:
-                    notice_text = ""
+        
+        # 💡 [신규] 듀얼 입력 방식 UI
+        upload_method = st.radio("공고문 입력 방식", ["☁️ 구글 드라이브 '작성대상' 폴더에서 선택", "📤 직접 드래그 앤 드롭"], horizontal=True)
+        
+        notice_text_temp = ""
+        ready_to_analyze = False
+        
+        if upload_method == "📤 직접 드래그 앤 드롭":
+            notice_files = st.file_uploader("작성 안내서, 자기평가서, 세부기준 등 PDF 업로드", type=['pdf'], accept_multiple_files=True)
+            if notice_files and api_key and st.button("🧠 업로드한 공고 AI 분석", type="primary"):
+                with st.spinner("PDF 문서를 읽는 중..."):
                     for file in notice_files:
                         pdf = PyPDF2.PdfReader(file)
-                        for page in pdf.pages[:15]: notice_text += page.extract_text() or ""
+                        for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                    ready_to_analyze = True
                     
-                    st.session_state.notice_text = notice_text
+        else: # ☁️ 드라이브 선택 모드
+            if api_key:
+                drive_service = authenticate_google_drive()
+                if drive_service:
+                    project_folders = get_target_project_folders(drive_service)
+                    if not project_folders:
+                        st.info("💡 구글 드라이브에 `작성대상` 폴더가 없거나, 하위 공고 폴더가 비어있습니다.")
+                    else:
+                        selected_project_name = st.selectbox("분석할 공고(프로젝트) 폴더를 선택하세요:", list(project_folders.keys()))
+                        if st.button("🧠 선택한 공고 AI 분석", type="primary"):
+                            with st.spinner(f"'{selected_project_name}' 폴더의 모든 PDF를 읽어오는 중..."):
+                                target_id = project_folders[selected_project_name]
+                                pdf_files = get_all_pdfs_recursively(drive_service, target_id, depth=1)
+                                
+                                if not pdf_files:
+                                    st.warning("선택한 폴더 안에 PDF 파일이 없습니다.")
+                                else:
+                                    for pdf_file in pdf_files:
+                                        request = drive_service.files().get_media(fileId=pdf_file['id'])
+                                        fh = io.BytesIO()
+                                        downloader = MediaIoBaseDownload(fh, request)
+                                        done = False
+                                        while not done: _, done = downloader.next_chunk()
+                                        fh.seek(0)
+                                        pdf = PyPDF2.PdfReader(fh)
+                                        for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                                    ready_to_analyze = True
+        
+        # 통합 분석 실행
+        if ready_to_analyze and notice_text_temp:
+            with st.spinner("AI가 공고문을 정독하며 세부기준과 자기평가서 양식을 매칭 중입니다..."):
+                try:
+                    st.session_state.notice_text = notice_text_temp
                     
                     prompt = f"""
-                    건설엔지니어링 PQ 공고문 분석 후 순수 JSON만 반환하세요.
+                    건설엔지니어링 PQ 공고문 텍스트 분석 후 순수 JSON만 반환.
                     1. eval_criteria: 배점표 배열 (대분류, 평가항목, 배점, 세부인정기준 등)
-                    2. settings: {{ 
-                        has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int),
-                        extra_settings: {{ "항목명": "내용" }}
-                    }}
-                    * 중요: extra_settings에는 공고문에 명시된 독특한 가점/감점 기준, 지역 가점, 특정 법령 우대, 신용도 배점 기준 등 모든 세부/특이사항을 자유롭게 추출하세요.
-                    공고문: {notice_text}
+                    2. settings: {{ has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int), extra_settings: {{"특이사항명": "내용"}} }}
+                    * 중요: 텍스트 안에 혼재된 '작성안내서', '제출서류', '세부점수기준', '자기평가서'의 맥락을 정확히 구분하고, 자기평가서 작성에 필요한 모든 가/감점 특이사항을 extra_settings에 추출하세요.
+                    공고문 텍스트: {notice_text_temp}
                     """
                     response = get_ai_model().generate_content(prompt)
                     parsed_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
                     
                     st.session_state.eval_criteria = pd.DataFrame(parsed_json.get("eval_criteria", []))
                     st.session_state.auto_settings = parsed_json.get("settings", st.session_state.auto_settings)
-                    st.success("✅ 공고문 분석 성공! 숨겨진 세부사항까지 [Tab 2]에 모두 세팅되었습니다.")
+                    st.success("✅ 분석 완료! 세부기준 및 양식이 [Tab 2]와 메모리에 저장되었습니다.")
                 except Exception as e:
                     st.error(f"공고문 분석 실패: {e}")
                         
@@ -334,17 +390,17 @@ with tab2:
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
     st.markdown("### 🏆 최종 시뮬레이션 및 평가 점수 산출")
-    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (최종 점수표 생성)", type="primary"):
+    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (자기평가서 양식 적용)", type="primary"):
         if not st.session_state.notice_text:
-            st.warning("⚠️ [Tab 1]에서 공고문을 먼저 업로드해야 해당 기준에 맞는 연산이 가능합니다!")
+            st.warning("⚠️ [Tab 1]에서 공고문을 먼저 분석해야 해당 기준에 맞는 연산이 가능합니다!")
         else:
-            with st.spinner('AI가 공고문, 마스터DB, 신용도(BB-)를 종합하여 엄격한 실점수 산출표를 작성 중입니다...'):
+            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 자기평가서 양식과 100% 동일한 점수표를 작성 중입니다... (약 15초 소요)'):
                 best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
                     final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
                 )
                 
                 if not best_score_df.empty:
-                    st.success("🎉 AI 최종 실점수 산출 완료!")
+                    st.success("🎉 AI 자기평가서 실점수 산출 완료!")
                     
                     total_allocated = pd.to_numeric(best_score_df['배점'], errors='coerce').sum()
                     total_earned = pd.to_numeric(best_score_df['획득점수'], errors='coerce').sum()
@@ -370,7 +426,6 @@ with tab4:
             with st.spinner("드라이브 '기술인' 폴더를 뒤져 해당 인원의 모든 증빙 서류를 추출 중입니다..."):
                 try:
                     drive_service = authenticate_google_drive()
-                    # 💡 [변경] 패키징 대상 폴더도 '기술인'으로 변경!
                     archive_query = "name='기술인' and mimeType='application/vnd.google-apps.folder' and trashed=false"
                     archive_res = drive_service.files().list(q=archive_query, fields="files(id)").execute()
                     
