@@ -22,7 +22,8 @@ if 'auto_settings' not in st.session_state:
     st.session_state.auto_settings = {
         "has_safety": True, "period": "3년",
         "bohal": [{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}],
-        "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2
+        "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2,
+        "extra_settings": {} # 💡 [신규] 공고문만의 특이사항을 무한대로 담을 주머니
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
@@ -75,9 +76,8 @@ def load_master_db_from_drive():
     except Exception as e:
         return pd.DataFrame()
 
-# 무한 루프 방지 및 안전한 재귀 탐색 함수
 def get_all_pdfs_recursively(drive_service, folder_id, depth=0):
-    if depth > 5: return [] # 최대 5단계까지만 파고들도록 제한 (무한루프 폭발 방지)
+    if depth > 5: return [] 
     pdfs = []
     query = f"'{folder_id}' in parents and trashed=false"
     page_token = None
@@ -91,8 +91,7 @@ def get_all_pdfs_recursively(drive_service, folder_id, depth=0):
                     pdfs.extend(get_all_pdfs_recursively(drive_service, file['id'], depth + 1))
             page_token = response.get('nextPageToken', None)
             if not page_token: break
-        except Exception:
-            break # 에러 발생 시 부드럽게 종료
+        except Exception: break
     return pdfs
 
 def get_all_subfolders_map(drive_service, root_id, depth=0):
@@ -108,11 +107,9 @@ def get_all_subfolders_map(drive_service, root_id, depth=0):
                 folder_dict.update(get_all_subfolders_map(drive_service, f['id'], depth + 1))
             page_token = response.get('nextPageToken', None)
             if not page_token: break
-        except Exception:
-            break
+        except Exception: break
     return folder_dict
 
-# 💡 [핵심] 캐싱(@st.cache_data)을 적용하여 5분 동안 스캔 결과를 뇌에 기억해 둡니다. 앱이 뻗지 않습니다!
 @st.cache_data(ttl=300)
 def scan_drive_archive_cached():
     try:
@@ -131,8 +128,7 @@ def scan_drive_archive_cached():
             all_pdfs = get_all_pdfs_recursively(drive_service, folder['id'])
             archive_status[folder['name']] = [f['name'] for f in all_pdfs]
         return archive_status
-    except Exception as e:
-        return {"시스템 스캔 오류 (새로고침을 눌러주세요)": []}
+    except Exception: return {"시스템 스캔 오류 (새로고침을 눌러주세요)": []}
 
 def get_ai_model():
     return genai.GenerativeModel('gemini-3.6-flash')
@@ -194,7 +190,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 딥-서치 캐시 메모리 장착 (시스템 과부하 원천 차단)")
+st.caption("※ 실무 완벽 대응: 공고문 특이사항 무한 자동 생성 + 에러 철통 방어 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -205,34 +201,44 @@ with tab1:
         st.subheader("Zone A: 공고문/지침서 분석")
         notice_files = st.file_uploader("공고문 파일(PDF) 업로드", type=['pdf'], accept_multiple_files=True, key="zone_a")
         if notice_files and api_key and st.button("🧠 공고문 AI 분석 및 평가기준 구성", type="primary"):
-            with st.spinner("AI가 공고문을 정독 중입니다..."):
+            with st.spinner("AI가 공고문을 정독하며 숨은 특이사항을 찾아내고 있습니다..."):
                 try:
                     notice_text = ""
                     for file in notice_files:
                         pdf = PyPDF2.PdfReader(file)
                         for page in pdf.pages[:7]: notice_text += page.extract_text() or ""
+                    
                     st.session_state.notice_text = notice_text
-                    prompt = f"건설엔지니어링 PQ 공고문 분석 후 JSON 반환.\n1. eval_criteria: 배점표\n2. settings: {{ has_safety, period, bohal, pm_cnt, pe_cnt, pes_cnt }}\n공고문: {notice_text}\n순수 JSON만 출력."
+                    
+                    # 💡 [핵심] AI에게 지정된 항목 외에 '특이사항(extra_settings)'을 스스로 찾아 추가하라고 지시
+                    prompt = f"""
+                    건설엔지니어링 PQ 공고문 분석 후 순수 JSON만 반환하세요.
+                    1. eval_criteria: 배점표 배열
+                    2. settings: {{ 
+                        has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int),
+                        extra_settings: {{ "항목명": "내용" }}
+                    }}
+                    * 중요: extra_settings에는 위 정해진 항목 외에 공고문에 명시된 독특한 가점/감점 기준, 지역 가점, 특정 법령(시안법 등) 우대, 신용도 배점 기준 등 모든 세부/특이사항을 자유롭게 다수 추출하여 키-값 쌍으로 담으세요.
+                    공고문: {notice_text}
+                    """
                     response = get_ai_model().generate_content(prompt)
                     parsed_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+                    
                     st.session_state.eval_criteria = pd.DataFrame(parsed_json.get("eval_criteria", []))
                     st.session_state.auto_settings = parsed_json.get("settings", st.session_state.auto_settings)
-                    st.success("✅ 공고문 분석 성공! 평가 기준 및 텍스트가 시스템에 저장되었습니다.")
+                    st.success("✅ 공고문 분석 성공! 숨겨진 세부사항까지 [Tab 2]에 모두 세팅되었습니다.")
                 except Exception as e:
                     st.error(f"공고문 분석 실패: {e}")
                         
     with col2:
         st.subheader("Zone B: 구글 드라이브 실적 아카이브 현황")
         st.info("💡 실적증명서 및 수료증 PDF는 구글 드라이브 `[증빙자료_아카이브]` 폴더에 자유롭게 업로드하시면 됩니다.")
-        
         if st.button("🔍 구글 드라이브 아카이브 현황 새로고침"):
-            # 💡 [핵심] 버튼을 누를 때만 기존 기억(캐시)을 삭제하고 새로 스캔합니다.
             scan_drive_archive_cached.clear()
             load_master_db_from_drive.clear()
             st.rerun()
 
         with st.spinner("구글 드라이브 딥-스캔 중..."):
-            # 안전하게 캐시된 데이터를 불러옵니다.
             archive_data = scan_drive_archive_cached()
             if archive_data:
                 st.success(f"📂 스캔 완료!")
@@ -256,25 +262,52 @@ with tab2:
     
     st.markdown("---")
     s_settings = st.session_state.auto_settings
+    
+    # 💡 [핵심 방어막] 보할 데이터가 없거나 엉뚱해도 에러 없이 빈 칸 처리
+    bohal_data = s_settings.get('bohal', [])
+    if not isinstance(bohal_data, list) or len(bohal_data) == 0: 
+        bohal_data = [{"전문분야": "해당없음", "비율(%)": 0}]
+
+    # 💡 [신규] 공고문에서 알아서 찾아낸 특이/세부사항들
+    extra_settings = s_settings.get('extra_settings', {})
+    if not isinstance(extra_settings, dict): extra_settings = {"기타사항": str(extra_settings)}
+
     if not manual_override:
         st.success("🤖 AI 자동 세팅 모드입니다.")
         col_a, col_b = st.columns(2)
         with col_a:
-            st.write(f"- **정기안전점검 포함:** {'✅' if s_settings['has_safety'] else '❌'}")
-            st.write(f"- **실적 인정 기간:** {s_settings['period']}")
-            st.write(f"- **필요 인원:** 사책 {s_settings['pm_cnt']} / 분책 {s_settings['pe_cnt']} / 분참 {s_settings['pes_cnt']}")
+            st.write(f"- **정기안전점검 포함:** {'✅' if s_settings.get('has_safety', False) else '❌'}")
+            st.write(f"- **실적 인정 기간:** {s_settings.get('period', '제한없음')}")
+            st.write(f"- **필요 인원:** 사책 {s_settings.get('pm_cnt', 1)} / 분책 {s_settings.get('pe_cnt', 0)} / 분참 {s_settings.get('pes_cnt', 0)}")
         with col_b:
-            st.write("- **보할 인정 비율:**"); st.table(pd.DataFrame(s_settings['bohal']))
-        final_pm_cnt, final_pe_cnt, final_pes_cnt = s_settings['pm_cnt'], s_settings['pe_cnt'], s_settings['pes_cnt']
+            st.write("- **보할 인정 비율:**")
+            st.table(pd.DataFrame(bohal_data))
+            
+        final_pm_cnt, final_pe_cnt, final_pes_cnt = s_settings.get('pm_cnt', 1), s_settings.get('pe_cnt', 0), s_settings.get('pes_cnt', 0)
+        
+        # 특이사항 동적 렌더링
+        st.markdown("##### 📌 공고문 특이/세부사항 (AI 자동 추출)")
+        if extra_settings:
+            for k, v in extra_settings.items():
+                st.info(f"**{k}** : {v}")
+        else:
+            st.caption("별도의 특이사항이 발견되지 않았습니다.")
+            
     else:
         st.warning("⚠️ 수동 설정 모드입니다.")
-        chk_safety = st.checkbox("✅ 정기안전점검 포함", value=s_settings['has_safety'])
+        chk_safety = st.checkbox("✅ 정기안전점검 포함", value=s_settings.get('has_safety', True))
         sel_period = st.selectbox("↳ 인정 기간", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
-        st.write("**✅ 보할 설정**"); edited_bohal = st.data_editor(pd.DataFrame(s_settings['bohal']), num_rows="dynamic")
+        st.write("**✅ 보할 설정**")
+        edited_bohal = st.data_editor(pd.DataFrame(bohal_data), num_rows="dynamic")
+        
         col_pm, col_pe, col_pes = st.columns(3)
-        with col_pm: final_pm_cnt = st.number_input("사책(명)", value=s_settings['pm_cnt'])
-        with col_pe: final_pe_cnt = st.number_input("분책(명)", value=s_settings['pe_cnt'])
-        with col_pes: final_pes_cnt = st.number_input("분참(명)", value=s_settings['pes_cnt'])
+        with col_pm: final_pm_cnt = st.number_input("사책(명)", value=s_settings.get('pm_cnt', 1))
+        with col_pe: final_pe_cnt = st.number_input("분책(명)", value=s_settings.get('pe_cnt', 0))
+        with col_pes: final_pes_cnt = st.number_input("분참(명)", value=s_settings.get('pes_cnt', 0))
+        
+        st.markdown("##### 📌 특이/세부사항 수동 편집")
+        extra_df = pd.DataFrame(list(extra_settings.items()), columns=["항목명", "내용"])
+        edited_extra = st.data_editor(extra_df, num_rows="dynamic", use_container_width=True)
 
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
@@ -314,7 +347,6 @@ with tab4:
                         archive_id = archive_res['files'][0]['id']
                         zip_buffer = io.BytesIO()
                         found_files_count = 0
-                        
                         folder_map = get_all_subfolders_map(drive_service, archive_id)
                         
                         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
@@ -334,8 +366,7 @@ with tab4:
                                                 fh.seek(0)
                                                 z.writestr(f"{person_name}/{pdf_file['name']}", fh.read())
                                                 found_files_count += 1
-                                            except Exception:
-                                                pass # 파일 하나 에러 나도 무시하고 계속 진행
+                                            except Exception: pass
                                     else:
                                         z.writestr(f"{person_name}/안내_서류없음.txt", "폴더는 있으나 내부에 PDF 서류가 없습니다.".encode('utf-8'))
                                 else:
