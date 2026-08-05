@@ -131,6 +131,7 @@ def scan_drive_archive_cached():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return {}
+        # 무조건 '기술인' 폴더 타겟팅 유지
         q_arch = "name='기술인' and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res_arch = drive_service.files().list(q=q_arch, fields="files(id)").execute()
         if not res_arch.get('files'): return {}
@@ -146,18 +147,14 @@ def scan_drive_archive_cached():
         return archive_status
     except Exception: return {"시스템 스캔 오류 (새로고침을 눌러주세요)": []}
 
-# 💡 [신규] '작성대상' 폴더 내부의 공고 리스트(하위 폴더)를 가져오는 함수
 def get_target_project_folders(drive_service):
     try:
-        # 1. '작성대상' 폴더 찾기
         q = "name='작성대상' and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res = drive_service.files().list(q=q, fields="files(id)").execute()
         items = res.get('files', [])
         if not items: return {}
         
         target_id = items[0]['id']
-        
-        # 2. 그 안의 프로젝트(공고) 폴더들 목록 가져오기
         q_sub = f"'{target_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res_sub = drive_service.files().list(q=q_sub, fields="files(id, name)").execute()
         return {f['name']: f['id'] for f in res_sub.get('files', [])}
@@ -181,23 +178,46 @@ class PQScoringEngine:
         available_engineers = list(scan_drive_archive_cached().keys())
         engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
         
-        # 💡 [핵심] '자기평가서' 양식을 100% 미러링하라는 강력한 지시 프롬프트 추가
+        # 💡 [핵심 개조] 자기평가서 서식을 강제하는 JSON 스키마 주입 및 엄격한 계산 지시
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
         아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여 최적의 '드림팀'을 선발하고, 평가 점수 산출표를 작성하세요.
 
-        [★★★★★ 절대 준수 최우선 규칙: 자기평가서 완벽 미러링]
-        제공된 공고문 텍스트 내에는 '자기평가서'라는 제출 양식이 존재합니다. 
-        반환하는 JSON의 "pq_score_table"은 **반드시 이 '자기평가서'의 행(Row)과 열(Column) 항목명을 100% 동일하게 복제**하여 작성해야 합니다.
-        심사관이 보았을 때 "자기평가서 양식에 점수와 계산근거만 정확하게 채워 넣었구나!"라고 느낄 수 있어야 합니다. 
-        점수를 계산할 때는 '세부 점수 기준'의 산식을 엄격히 적용하세요.
+        [★★★★★ 절대 준수 3대 규칙]
+        1. **완벽한 서식 미러링:** 반환하는 JSON의 "pq_score_table"은 아래 제공된 <출력 양식 뼈대>의 항목명(대분류, 중분류, 세부항목)과 '배점'을 토씨 하나 틀리지 말고 100% 똑같이 유지하세요. 당신은 오직 '획득점수'와 '점수계산근거'만 채워야 합니다.
+        2. **만점 환각(Hallucination) 절대 금지:** 대충 만점을 주지 마세요. CSV 데이터의 실제 인정일수, 건수, 금액을 바탕으로 공고문 기준에 따라 깎을 건 깎고 정확히 계산하세요. 계산 근거에는 반드시 양식에 맞춰 "건수: X건", "금액: X억원", "등급: X급" 등 실제 수치를 적으세요.
+        3. **신용도 BB- 고정 강제:** 당사의 신용평가등급은 **'BB-'** 입니다. '재정상태 건실도' 등 신용도 관련 배점에서 BB-에 해당하는 실제 점수를 무조건 감점 처리하여 반영하세요. 절대 만점을 주면 안 됩니다.
 
-        [평가 핵심 지침]
-        1. 후보군 제한: 반드시 다음 명단에 있는 기술자들 중에서만 선발하세요: [{engineers_str}].
-        2. 기업 신용도 고정: 당사의 신용평가등급은 'BB-' 입니다. 세부 점수 기준에서 BB-에 해당하는 실제 점수를 감점 적용하세요. 무조건 만점을 주면 안 됩니다.
-        3. 엄격한 실적 계산: 제공된 DB의 '인정일수', '건수', '금액' 등을 철저히 계산하여 기준 미달 시 반드시 공고문 산식에 따라 감점 처리하세요.
-        4. 기간 필터링: 공고 기간을 2026년 기준으로 환산하여 유효 실적만 인정하세요.
-        5. 요구 인원: 사책(PM) {pm_cnt}명, 분책(PE) {pe_cnt}명, 분참(PES) {pes_cnt}명.
+        [후보군 및 조건]
+        - 가용 기술자 명단 (이 명단 내에서만 선발): [{engineers_str}]
+        - 필요 인원: 사책 {pm_cnt}명, 분책 {pe_cnt}명, 분참 {pes_cnt}명
+
+        <출력 양식 뼈대 (이 구조를 그대로 복사하여 획득점수와 근거만 채울 것)>
+        [
+            {{"대분류": "참여기술인", "중분류": "사업책임기술인", "세부항목": "등급", "배점": "-", "획득점수": 0.0, "점수계산근거": "등급: "}},
+            {{"대분류": "참여기술인", "중분류": "사업책임기술인", "세부항목": "경력", "배점": 8.0, "획득점수": 0.0, "점수계산근거": "경력: 년 월"}},
+            {{"대분류": "참여기술인", "중분류": "사업책임기술인", "세부항목": "실적(건수)", "배점": 5.0, "획득점수": 0.0, "점수계산근거": "건수: 건"}},
+            {{"대분류": "참여기술인", "중분류": "사업책임기술인", "세부항목": "실적(금액)", "배점": 5.0, "획득점수": 0.0, "점수계산근거": "금액: 억원"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(조사/시험)", "세부항목": "등급", "배점": 1.0, "획득점수": 0.0, "점수계산근거": "등급: "}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(조사/시험)", "세부항목": "경력", "배점": 3.0, "획득점수": 0.0, "점수계산근거": "경력: 년 월"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(조사/시험)", "세부항목": "실적(건수)", "배점": 2.5, "획득점수": 0.0, "점수계산근거": "건수: 건"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(조사/시험)", "세부항목": "실적(금액)", "배점": 2.5, "획득점수": 0.0, "점수계산근거": "금액: 억원"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(분석/평가)", "세부항목": "등급", "배점": 1.0, "획득점수": 0.0, "점수계산근거": "등급: "}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(분석/평가)", "세부항목": "경력", "배점": 3.0, "획득점수": 0.0, "점수계산근거": "경력: 년 월"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(분석/평가)", "세부항목": "실적(건수)", "배점": 2.5, "획득점수": 0.0, "점수계산근거": "건수: 건"}},
+            {{"대분류": "참여기술인", "중분류": "분야별 책임기술인(분석/평가)", "세부항목": "실적(금액)", "배점": 2.5, "획득점수": 0.0, "점수계산근거": "금액: 억원"}},
+            {{"대분류": "유사용역 수행실적", "중분류": "수행실적", "세부항목": "실적(건수)", "배점": 12.0, "획득점수": 0.0, "점수계산근거": "건수: 건"}},
+            {{"대분류": "유사용역 수행실적", "중분류": "수행실적", "세부항목": "실적(금액)", "배점": 13.0, "획득점수": 0.0, "점수계산근거": "금액: 억원"}},
+            {{"대분류": "신용도", "중분류": "신용도", "세부항목": "점검진단 실시결과 평가결과", "배점": 4.0, "획득점수": 0.0, "점수계산근거": "불량: 건, 매우불량: 건"}},
+            {{"대분류": "신용도", "중분류": "신용도", "세부항목": "업무정지", "배점": 3.0, "획득점수": 0.0, "점수계산근거": "참여기술자 지정기간: 월"}},
+            {{"대분류": "신용도", "중분류": "신용도", "세부항목": "재정상태 건실도", "배점": 3.0, "획득점수": 0.0, "점수계산근거": "기업신용등급: BB- 적용"}},
+            {{"대분류": "기술개발 및 투자실적", "중분류": "기술개발", "세부항목": "개발실적", "배점": 1.0, "획득점수": 0.0, "점수계산근거": "환산건수: 건"}},
+            {{"대분류": "기술개발 및 투자실적", "중분류": "기술개발", "세부항목": "활용실적", "배점": 1.0, "획득점수": 0.0, "점수계산근거": "금액: 억원"}},
+            {{"대분류": "기술개발 및 투자실적", "중분류": "투자실적", "세부항목": "투자실적", "배점": 8.0, "획득점수": 0.0, "점수계산근거": "투자실적비율: %"}},
+            {{"대분류": "업무중첩도", "중분류": "업무중첩도", "세부항목": "책임기술자", "배점": 6.0, "획득점수": 0.0, "점수계산근거": "중복 잔여과업기간: 월"}},
+            {{"대분류": "업무중첩도", "중분류": "업무중첩도", "세부항목": "분야별 책임기술자", "배점": 4.0, "획득점수": 0.0, "점수계산근거": "중복 잔여과업기간: 월"}},
+            {{"대분류": "가점", "중분류": "가점", "세부항목": "건설기술자 신규고용", "배점": 0.3, "획득점수": 0.0, "점수계산근거": "건설기술자 신규 고용율: %"}}
+        ]
 
         [공고문 전체 텍스트]
         {notice_text[:7000]} 
@@ -207,13 +227,10 @@ class PQScoringEngine:
 
         분석 결과를 오직 아래 JSON 포맷으로만 반환하세요.
         {{
-            "pq_score_table": [
-                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 17.5, "점수계산근거": "[이름] 인정일수 1000일 적용, 기준 미달로 감점"}},
-                {{"대분류": "신용도", "평가항목": "재정상태 건실도", "배점": 3, "획득점수": 1.5, "점수계산근거": "신용등급 BB- 적용"}}
-            ],
-            "pm": ["이름1"],
-            "pe": ["이름2", "이름3"],
-            "pes": ["이름4", "이름5"]
+            "pq_score_table": [ 위의 양식을 채운 배열 ],
+            "pm": ["선발된 이름1"],
+            "pe": ["선발된 이름2", "선발된 이름3"],
+            "pes": ["선발된 이름4", "선발된 이름5"]
         }}
         """
         
@@ -235,7 +252,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 듀얼 입력 모드(드라이브 연동) + 자기평가서 100% 미러링 엔진 탑재")
+st.caption("※ 엄격 통제 모드: 자기평가서 서식 100% 강제 미러링 및 BB- 신용도 고정")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -245,7 +262,6 @@ with tab1:
     with col1:
         st.subheader("Zone A: 공고문/지침서 분석")
         
-        # 💡 [신규] 듀얼 입력 방식 UI
         upload_method = st.radio("공고문 입력 방식", ["☁️ 구글 드라이브 '작성대상' 폴더에서 선택", "📤 직접 드래그 앤 드롭"], horizontal=True)
         
         notice_text_temp = ""
@@ -288,7 +304,6 @@ with tab1:
                                         for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
                                     ready_to_analyze = True
         
-        # 통합 분석 실행
         if ready_to_analyze and notice_text_temp:
             with st.spinner("AI가 공고문을 정독하며 세부기준과 자기평가서 양식을 매칭 중입니다..."):
                 try:
@@ -296,7 +311,7 @@ with tab1:
                     
                     prompt = f"""
                     건설엔지니어링 PQ 공고문 텍스트 분석 후 순수 JSON만 반환.
-                    1. eval_criteria: 배점표 배열 (대분류, 평가항목, 배점, 세부인정기준 등)
+                    1. eval_criteria: 배점표 배열
                     2. settings: {{ has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int), extra_settings: {{"특이사항명": "내용"}} }}
                     * 중요: 텍스트 안에 혼재된 '작성안내서', '제출서류', '세부점수기준', '자기평가서'의 맥락을 정확히 구분하고, 자기평가서 작성에 필요한 모든 가/감점 특이사항을 extra_settings에 추출하세요.
                     공고문 텍스트: {notice_text_temp}
@@ -357,7 +372,7 @@ with tab2:
             st.write(f"- **정기안전점검 포함:** {'✅' if s_settings.get('has_safety', False) else '❌'}")
             st.write(f"- **실적 인정 기간:** {s_settings.get('period', '제한없음')}")
             st.write(f"- **필요 인원:** 사책 {s_settings.get('pm_cnt', 1)} / 분책 {s_settings.get('pe_cnt', 0)} / 분참 {s_settings.get('pes_cnt', 0)}")
-            st.write("- **기업 신용평가등급:** **BB- (고정)**")
+            st.write("- **기업 신용평가등급:** **BB- (절대 고정/감점 적용)**")
         with col_b:
             st.write("- **보할 인정 비율:**")
             st.table(pd.DataFrame(bohal_data))
@@ -389,31 +404,37 @@ with tab2:
 
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
-    st.markdown("### 🏆 최종 시뮬레이션 및 평가 점수 산출")
-    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (자기평가서 양식 적용)", type="primary"):
+    st.markdown("### 🏆 최종 시뮬레이션 및 엄격한 점수 산출")
+    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (자기평가서 완벽 미러링)", type="primary"):
         if not st.session_state.notice_text:
             st.warning("⚠️ [Tab 1]에서 공고문을 먼저 분석해야 해당 기준에 맞는 연산이 가능합니다!")
         else:
-            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 자기평가서 양식과 100% 동일한 점수표를 작성 중입니다... (약 15초 소요)'):
+            with st.spinner('AI가 자기평가서 서식을 복제하고, 엑셀 데이터를 계산하여 감점 요소를 반영 중입니다... (약 15초 소요)'):
                 best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
                     final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
                 )
                 
                 if not best_score_df.empty:
-                    st.success("🎉 AI 자기평가서 실점수 산출 완료!")
+                    st.success("🎉 AI 자기평가서 실점수 산출 및 표 작성 완료!")
                     
-                    total_allocated = pd.to_numeric(best_score_df['배점'], errors='coerce').sum()
-                    total_earned = pd.to_numeric(best_score_df['획득점수'], errors='coerce').sum()
+                    # 배점란이 '-' 인 경우 제외하고 계산
+                    best_score_df['배점_num'] = pd.to_numeric(best_score_df['배점'], errors='coerce')
+                    best_score_df['획득점수_num'] = pd.to_numeric(best_score_df['획득점수'], errors='coerce')
+                    
+                    total_allocated = best_score_df['배점_num'].sum()
+                    total_earned = best_score_df['획득점수_num'].sum()
                     
                     col1, col2 = st.columns(2)
-                    col1.metric("총 배점 (가격 제외)", f"{total_allocated:g}점")
+                    col1.metric("총 배점 (합계)", f"{total_allocated:g}점")
                     col2.metric("최종 획득 점수", f"{total_earned:g}점")
                     
-                    st.dataframe(best_score_df, use_container_width=True)
-                    st.session_state.final_pq_score_table = best_score_df
+                    # 보여주기 용이하게 임시 숫자컬럼 제외
+                    display_df = best_score_df.drop(columns=['배점_num', '획득점수_num'])
+                    st.dataframe(display_df, use_container_width=True)
+                    st.session_state.final_pq_score_table = display_df
                     
                     st.session_state.dream_team = rec_pm + rec_pe + rec_pes
-                    st.info(f"👉 **선발된 드림팀 명단:** {', '.join(st.session_state.dream_team)}")
+                    st.info(f"👉 **최종 선발 명단:** {', '.join(st.session_state.dream_team)}")
 
 # --- [Tab 4] 서류 출력 및 패키징 ---
 with tab4:
@@ -441,8 +462,8 @@ with tab4:
                             if not st.session_state.final_pq_score_table.empty:
                                 excel_buffer = io.BytesIO()
                                 with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                                    st.session_state.final_pq_score_table.to_excel(writer, index=False, sheet_name='최종점수표')
-                                z.writestr("0_최종_PQ평가_산출표.xlsx", excel_buffer.getvalue())
+                                    st.session_state.final_pq_score_table.to_excel(writer, index=False, sheet_name='자기평가서_산출표')
+                                z.writestr("0_자기평가서_양식_산출표.xlsx", excel_buffer.getvalue())
                                 
                             for person_name in st.session_state.dream_team:
                                 if person_name in folder_map:
@@ -468,7 +489,7 @@ with tab4:
                         
                         zip_buffer.seek(0)
                         if found_files_count > 0:
-                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF와 최종 점수 산출표를 찾아 압축했습니다.")
+                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF와 자기평가서 산출표를 찾아 압축했습니다.")
                             st.download_button("📦 최종 제출서류 패키지 다운로드 (ZIP)", data=zip_buffer, file_name="최종_PQ제출서류_패키지.zip", mime="application/zip", type="primary")
                         else: st.warning("선발된 인원에 해당하는 PDF 서류를 찾지 못했습니다.")
                 except Exception as e: st.error(f"서류 패키징 중 오류 발생: {e}")
