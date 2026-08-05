@@ -27,7 +27,6 @@ if 'auto_settings' not in st.session_state:
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
-# 💡 [신규] 최종 상세 점수표를 저장할 메모리
 if 'final_pq_score_table' not in st.session_state: st.session_state.final_pq_score_table = pd.DataFrame()
 
 with st.sidebar:
@@ -133,7 +132,8 @@ def scan_drive_archive_cached():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return {}
-        q_arch = "name='[증빙자료_아카이브]' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        # 💡 [변경] 최상위 폴더 타겟을 '기술인'으로 변경!
+        q_arch = "name='기술인' and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res_arch = drive_service.files().list(q=q_arch, fields="files(id)").execute()
         if not res_arch.get('files'): return {}
         
@@ -163,16 +163,21 @@ class PQScoringEngine:
             
         db_csv = master_db.to_csv(index=False)
         
-        # 💡 [핵심] 최종 점수표(100점 만점) 양식에 맞춘 프롬프트 업그레이드
+        # 💡 [변경] 현재 드라이브 '기술인' 폴더에 존재하는 실제 인물 명단 추출
+        available_engineers = list(scan_drive_archive_cached().keys())
+        engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
+        
+        # 💡 [핵심] 신용도 고정 및 만점 환각 방지 지시 프롬프트
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
-        아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여, 100점 만점 기준의 최종 PQ 점수 산출표와 최적의 '드림팀' 명단을 선발하세요. (단, 가격 점수는 제외하고 서류/실적 점수만 산출합니다.)
+        아래 [공고문 전체 텍스트]와 [엔지니어 실적 Master DB]를 분석하여, 100점 만점 기준의 최종 PQ 점수 산출표와 최적의 '드림팀' 명단을 선발하세요. (가격 점수는 제외)
 
-        [평가 핵심 지침]
-        1. 기간 필터링: 공고 기간(예: 3년)을 2026년 기준으로 정확히 환산하여 유효 실적만 필터링하세요.
-        2. 특이 기준 적용: 특정 법령(시안법 등), 특정 분야 가점 등 공고문 내의 모든 세부 규칙을 빠짐없이 DB 실적 점수에 반영하세요.
-        3. 전체 항목 평가: 공고문에 명시된 '참여기술인', '유사용역수행실적', '신용도(재정상태/업무정지)', '기술개발및투자실적', '업무중첩도', '가점', '감점' 등 모든 항목의 배점을 파악하고, 이에 맞춘 획득 점수와 구체적인 '점수계산근거'를 작성하세요.
-        4. 요구 인원: 사업책임(PM) {pm_cnt}명, 분야책임(PE) {pe_cnt}명, 분야참여(PES) {pes_cnt}명 선발.
+        [절대 준수 규칙]
+        1. **후보군 제한:** 당신은 반드시 다음 명단에 있는 기술자들 중에서만 인원을 선발해야 합니다: [{engineers_str}]. 이 명단에 없는 가상의 인물을 지어내면 안 됩니다.
+        2. **기업 신용도 고정:** 당사의 신용평가등급은 **'BB-'** 입니다. 공고문의 신용도(재정상태 건실도 등) 배점표를 확인하여, BB-에 해당하는 실제 점수를 반드시 깎아서(감점 반영하여) 계산하세요. 무조건 만점을 주면 안 됩니다.
+        3. **엄격한 실적 계산 (만점 환각 방지):** 제공된 마스터 DB CSV의 '인정일수', '건수', '금액' 등을 철저히 분석하세요. 기준에 미달하면 임의로 만점을 주지 말고, 공고문 산식에 따라 반드시 점수를 깎아야 합니다.
+        4. 기간 필터링: 공고 기간(예: 3년)을 2026년 기준으로 환산하여 유효 실적만 인정하세요.
+        5. 요구 인원: 사업책임(PM) {pm_cnt}명, 분야책임(PE) {pe_cnt}명, 분야참여(PES) {pes_cnt}명 선발.
 
         [공고문 전체 텍스트]
         {notice_text[:5000]} 
@@ -183,10 +188,8 @@ class PQScoringEngine:
         분석 결과를 오직 아래 JSON 포맷으로만 반환하세요.
         {{
             "pq_score_table": [
-                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 20.0, "점수계산근거": "[윤석순] 인정일수 1,200일 이상 (만점)"}},
-                {{"대분류": "신용도", "평가항목": "점검진단 실시결과", "배점": 4, "획득점수": 4.0, "점수계산근거": "불량 0건, 매우불량 0건"}},
-                {{"대분류": "업무중첩도", "평가항목": "책임기술자", "배점": 6, "획득점수": 6.0, "점수계산근거": "[윤석순] 중복 잔여과업기간 0개월"}}
-                // ... 공고문에 명시된 모든 항목에 대해 위 형식으로 작성하여 총점 100점이 되도록 구성할 것 (가/감점 포함)
+                {{"대분류": "참여기술인", "평가항목": "사업책임기술자", "배점": 20, "획득점수": 17.5, "점수계산근거": "[이름] 인정일수 부족으로 감점"}},
+                {{"대분류": "신용도", "평가항목": "재정상태 건실도", "배점": 3, "획득점수": 1.5, "점수계산근거": "신용등급 BB- 반영"}}
             ],
             "pm": ["이름1"],
             "pe": ["이름2", "이름3"],
@@ -212,7 +215,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 공고문 특이사항 추출 + 100점 만점 상세 산출표 생성기")
+st.caption("※ 실무 완벽 대응: '기술인' 폴더 한정 탐색 + 신용도 BB- 고정 + 실점수 산출")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -228,7 +231,6 @@ with tab1:
                     notice_text = ""
                     for file in notice_files:
                         pdf = PyPDF2.PdfReader(file)
-                        # 평가 기준이 뒷단에 있을 수 있으므로 더 넉넉하게 페이지를 읽어옵니다.
                         for page in pdf.pages[:15]: notice_text += page.extract_text() or ""
                     
                     st.session_state.notice_text = notice_text
@@ -253,17 +255,17 @@ with tab1:
                     st.error(f"공고문 분석 실패: {e}")
                         
     with col2:
-        st.subheader("Zone B: 구글 드라이브 실적 아카이브 현황")
-        st.info("💡 실적증명서 및 수료증 PDF는 구글 드라이브 `[증빙자료_아카이브]` 폴더에 자유롭게 업로드하시면 됩니다.")
+        st.subheader("Zone B: '기술인' 폴더 실적 아카이브 현황")
+        st.info("💡 실적증명서 및 수료증 PDF는 구글 드라이브 `기술인` 폴더 내 개인별 폴더에 자유롭게 업로드하시면 됩니다.")
         if st.button("🔍 구글 드라이브 아카이브 현황 새로고침"):
             scan_drive_archive_cached.clear()
             load_master_db_from_drive.clear()
             st.rerun()
 
-        with st.spinner("구글 드라이브 딥-스캔 중..."):
+        with st.spinner("구글 드라이브 '기술인' 폴더 딥-스캔 중..."):
             archive_data = scan_drive_archive_cached()
             if archive_data:
-                st.success(f"📂 스캔 완료!")
+                st.success(f"📂 기술자 총 {len(archive_data)}명의 폴더 스캔 완료!")
                 for name, pdfs in archive_data.items():
                     with st.expander(f"📁 **{name}** (총 {len(pdfs)}개 서류 보관 중)"):
                         if pdfs:
@@ -271,7 +273,7 @@ with tab1:
                         else:
                             st.caption("해당 폴더 내부에는 어떠한 PDF도 존재하지 않습니다.")
             else:
-                st.warning("구글 드라이브 스캔 실패 또는 폴더가 비어 있습니다.")
+                st.warning("구글 드라이브 최상단에 `기술인` 폴더가 없거나 비어 있습니다.")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
@@ -299,6 +301,7 @@ with tab2:
             st.write(f"- **정기안전점검 포함:** {'✅' if s_settings.get('has_safety', False) else '❌'}")
             st.write(f"- **실적 인정 기간:** {s_settings.get('period', '제한없음')}")
             st.write(f"- **필요 인원:** 사책 {s_settings.get('pm_cnt', 1)} / 분책 {s_settings.get('pe_cnt', 0)} / 분참 {s_settings.get('pes_cnt', 0)}")
+            st.write("- **기업 신용평가등급:** **BB- (고정)**")
         with col_b:
             st.write("- **보할 인정 비율:**")
             st.table(pd.DataFrame(bohal_data))
@@ -335,17 +338,16 @@ with tab3:
         if not st.session_state.notice_text:
             st.warning("⚠️ [Tab 1]에서 공고문을 먼저 업로드해야 해당 기준에 맞는 연산이 가능합니다!")
         else:
-            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 100점 만점 기준의 최종 점수 산출표를 작성 중입니다... (약 15초 소요)'):
+            with st.spinner('AI가 공고문, 마스터DB, 신용도(BB-)를 종합하여 엄격한 실점수 산출표를 작성 중입니다...'):
                 best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
                     final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
                 )
                 
                 if not best_score_df.empty:
-                    st.success("🎉 AI 최종 점수 산출 완료!")
+                    st.success("🎉 AI 최종 실점수 산출 완료!")
                     
-                    # 💡 총점 계산 로직 추가
-                    total_allocated = best_score_df['배점'].sum()
-                    total_earned = best_score_df['획득점수'].sum()
+                    total_allocated = pd.to_numeric(best_score_df['배점'], errors='coerce').sum()
+                    total_earned = pd.to_numeric(best_score_df['획득점수'], errors='coerce').sum()
                     
                     col1, col2 = st.columns(2)
                     col1.metric("총 배점 (가격 제외)", f"{total_allocated:g}점")
@@ -365,14 +367,15 @@ with tab4:
     else:
         st.success(f"✅ 현재 선발된 기술자 명단: **{', '.join(st.session_state.dream_team)}**")
         if st.button("🔄 구글 드라이브에서 서류 수집 및 ZIP 패키징 시작", type="primary"):
-            with st.spinner("드라이브 전역을 뒤져 해당 인원의 모든 증빙 서류를 추출 중입니다..."):
+            with st.spinner("드라이브 '기술인' 폴더를 뒤져 해당 인원의 모든 증빙 서류를 추출 중입니다..."):
                 try:
                     drive_service = authenticate_google_drive()
-                    archive_query = "name='[증빙자료_아카이브]' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                    # 💡 [변경] 패키징 대상 폴더도 '기술인'으로 변경!
+                    archive_query = "name='기술인' and mimeType='application/vnd.google-apps.folder' and trashed=false"
                     archive_res = drive_service.files().list(q=archive_query, fields="files(id)").execute()
                     
                     if not archive_res.get('files'):
-                        st.error("구글 드라이브에 `[증빙자료_아카이브]` 폴더가 존재하지 않습니다.")
+                        st.error("구글 드라이브에 `기술인` 폴더가 존재하지 않습니다.")
                     else:
                         archive_id = archive_res['files'][0]['id']
                         zip_buffer = io.BytesIO()
@@ -380,7 +383,6 @@ with tab4:
                         folder_map = get_all_subfolders_map(drive_service, archive_id)
                         
                         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
-                            # 💡 생성된 점수표도 엑셀로 저장하여 패키지에 포함!
                             if not st.session_state.final_pq_score_table.empty:
                                 excel_buffer = io.BytesIO()
                                 with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
@@ -407,7 +409,7 @@ with tab4:
                                     else:
                                         z.writestr(f"{person_name}/안내_서류없음.txt", "폴더는 있으나 내부에 PDF 서류가 없습니다.".encode('utf-8'))
                                 else:
-                                    z.writestr(f"{person_name}/안내_폴더없음.txt", f"구글 드라이브에 '{person_name}' 폴더가 어디에도 없습니다.".encode('utf-8'))
+                                    z.writestr(f"{person_name}/안내_폴더없음.txt", f"구글 드라이브 '기술인' 폴더에 '{person_name}' 폴더가 어디에도 없습니다.".encode('utf-8'))
                         
                         zip_buffer.seek(0)
                         if found_files_count > 0:
