@@ -25,7 +25,6 @@ if 'auto_settings' not in st.session_state:
         "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
-# [핵심] 공고문 전체 내용을 기억할 메모리 공간
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
 
 with st.sidebar:
@@ -76,6 +75,38 @@ def load_master_db_from_drive():
     except Exception as e:
         return pd.DataFrame()
 
+# 💡 [핵심 업그레이드 1] 특정 폴더 내부의 모든 PDF를 끝까지 파고들어(재귀탐색) 가져오는 함수
+def get_all_pdfs_recursively(drive_service, folder_id):
+    pdfs = []
+    query = f"'{folder_id}' in parents and trashed=false"
+    page_token = None
+    while True:
+        response = drive_service.files().list(q=query, fields='nextPageToken, files(id, name, mimeType)', pageToken=page_token).execute()
+        for file in response.get('files', []):
+            if file['mimeType'] == 'application/pdf':
+                pdfs.append(file)
+            elif file['mimeType'] == 'application/vnd.google-apps.folder':
+                # 하위 폴더를 발견하면 그 안으로 한 번 더 진입!
+                pdfs.extend(get_all_pdfs_recursively(drive_service, file['id']))
+        page_token = response.get('nextPageToken', None)
+        if not page_token: break
+    return pdfs
+
+# 💡 [핵심 업그레이드 2] 특정 폴더 내부의 모든 하위 폴더들의 이름과 ID를 맵핑하는 함수 (Tab 4에서 사람 찾기용)
+def get_all_subfolders_map(drive_service, root_id):
+    folder_dict = {}
+    query = f"'{root_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    page_token = None
+    while True:
+        response = drive_service.files().list(q=query, fields='nextPageToken, files(id, name)', pageToken=page_token).execute()
+        for f in response.get('files', []):
+            folder_dict[f['name']] = f['id']
+            # 폴더 안의 폴더도 맵핑에 추가
+            folder_dict.update(get_all_subfolders_map(drive_service, f['id']))
+        page_token = response.get('nextPageToken', None)
+        if not page_token: break
+    return folder_dict
+
 def scan_drive_archive():
     drive_service = authenticate_google_drive()
     if not drive_service: return {}
@@ -89,9 +120,9 @@ def scan_drive_archive():
     
     archive_status = {}
     for folder in res_sub.get('files', []):
-        q_pdf = f"'{folder['id']}' in parents and mimeType='application/pdf' and trashed=false"
-        res_pdf = drive_service.files().list(q=q_pdf, fields="files(name)").execute()
-        archive_status[folder['name']] = [f['name'] for f in res_pdf.get('files', [])]
+        # 💡 [적용점] 최상위 폴더(예: 기술인)를 던져주면 그 안의 하위 트리를 모두 뒤져서 PDF만 싹 가져옴
+        all_pdfs = get_all_pdfs_recursively(drive_service, folder['id'])
+        archive_status[folder['name']] = [f['name'] for f in all_pdfs]
     return archive_status
 
 def get_ai_model():
@@ -109,10 +140,7 @@ class PQScoringEngine:
             st.error("구글 드라이브에서 마스터 DB 엑셀 파일을 찾을 수 없습니다.")
             return pd.DataFrame(), [], [], []
             
-        # 엑셀 DB를 AI가 읽을 수 있도록 CSV 텍스트로 변환
         db_csv = self.master_db.to_csv(index=False)
-        
-        # 💡 핵심: 대표님의 노하우가 100% 반영된 초정밀 프롬프트
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
         아래 [공고문 세부기준]과 [엔지니어 실적 Master DB]를 분석하여, PQ 총점이 가장 높은 최적의 '드림팀'을 선발하세요.
@@ -146,11 +174,10 @@ class PQScoringEngine:
             response = model.generate_content(prompt)
             result_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
             parsed = json.loads(result_text)
-            
             df = pd.DataFrame(parsed.get("best_score_df", []))
             return df, parsed.get("pm", []), parsed.get("pe", []), parsed.get("pes", [])
         except Exception as e:
-            st.error(f"AI 연산 중 오류 발생 (DB 용량 초과 또는 JSON 파싱 에러): {e}")
+            st.error(f"AI 연산 중 오류 발생: {e}")
             return pd.DataFrame(), [], [], []
 
 engine = PQScoringEngine()
@@ -159,7 +186,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 공고문 기준 완전 동적 적용 + 2026년 기준 년도 필터링 탑재")
+st.caption("※ 실무 완벽 대응: 딥-서치(Deep Search) 장착, 하위 폴더 전체 인식 모드")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -176,14 +203,10 @@ with tab1:
                     for file in notice_files:
                         pdf = PyPDF2.PdfReader(file)
                         for page in pdf.pages[:7]: notice_text += page.extract_text() or ""
-                    
-                    # 💡 향후 연산을 위해 공고문 전체 텍스트 저장
                     st.session_state.notice_text = notice_text
-                    
                     prompt = f"건설엔지니어링 PQ 공고문 분석 후 JSON 반환.\n1. eval_criteria: 배점표\n2. settings: {{ has_safety, period, bohal, pm_cnt, pe_cnt, pes_cnt }}\n공고문: {notice_text}\n순수 JSON만 출력."
                     response = get_ai_model().generate_content(prompt)
                     parsed_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
-                    
                     st.session_state.eval_criteria = pd.DataFrame(parsed_json.get("eval_criteria", []))
                     st.session_state.auto_settings = parsed_json.get("settings", st.session_state.auto_settings)
                     st.success("✅ 공고문 분석 성공! 평가 기준 및 텍스트가 시스템에 저장되었습니다.")
@@ -197,15 +220,18 @@ with tab1:
             load_master_db_from_drive.clear()
             st.rerun()
 
-        with st.spinner("구글 드라이브 스캔 중..."):
+        with st.spinner("구글 드라이브 딥-스캔 중... (폴더 구조 파악)"):
             archive_data = scan_drive_archive()
             if archive_data:
-                st.success(f"📂 총 {len(archive_data)}명의 기술자 폴더가 확인되었습니다.")
+                st.success(f"📂 최상위 카테고리 스캔 완료!")
                 for name, pdfs in archive_data.items():
-                    with st.expander(f"👤 **{name}** ({len(pdfs)}개 서류 보관 중)"):
-                        for pdf in pdfs: st.write(f"- 📄 `{pdf}`")
+                    with st.expander(f"📁 **{name}** (총 {len(pdfs)}개 서류 보관 중)"):
+                        if pdfs:
+                            for pdf in pdfs: st.write(f"- 📄 `{pdf}`")
+                        else:
+                            st.caption("해당 카테고리 내부에는 어떠한 PDF도 존재하지 않습니다.")
             else:
-                st.warning("구글 드라이브에 `[증빙자료_아카이브]` 폴더가 없거나 비어 있습니다.")
+                st.warning("구글 드라이브에 `[증빙자료_아카이브]` 폴더가 없거나 완전히 비어 있습니다.")
 
 # --- [Tab 2] 공고문 세부사항 설정 ---
 with tab2:
@@ -245,7 +271,7 @@ with tab3:
         if not st.session_state.notice_text:
             st.warning("⚠️ [Tab 1]에서 공고문을 먼저 업로드해야 해당 기준에 맞는 연산이 가능합니다!")
         else:
-            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 최적의 조합을 연산 중입니다... (약 10~20초 소요)'):
+            with st.spinner('AI가 마스터 DB와 공고문 기준을 매칭하여 최적의 조합을 연산 중입니다...'):
                 best_score, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
                     final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
                 )
@@ -255,7 +281,6 @@ with tab3:
                     st.dataframe(best_score, use_container_width=True)
                     st.session_state.dream_team = rec_pm + rec_pe + rec_pes
                     st.info(f"👉 **최종 선발 명단:** {', '.join(st.session_state.dream_team)}")
-                    st.caption("이 명단을 바탕으로 [Tab 4]에서 구글 드라이브의 해당 서류들을 한 번에 패키징합니다.")
 
 # --- [Tab 4] 서류 출력 및 패키징 ---
 with tab4:
@@ -265,7 +290,7 @@ with tab4:
     else:
         st.success(f"✅ 현재 선발된 기술자 명단: **{', '.join(st.session_state.dream_team)}**")
         if st.button("🔄 구글 드라이브에서 서류 수집 및 ZIP 패키징 시작", type="primary"):
-            with st.spinner("구글 드라이브에서 해당 인원의 PDF 증빙 서류를 수집 중입니다..."):
+            with st.spinner("드라이브 전역을 뒤져 해당 인원의 모든 증빙 서류를 추출 중입니다..."):
                 try:
                     drive_service = authenticate_google_drive()
                     archive_query = "name='[증빙자료_아카이브]' and mimeType='application/vnd.google-apps.folder' and trashed=false"
@@ -278,31 +303,35 @@ with tab4:
                         zip_buffer = io.BytesIO()
                         found_files_count = 0
                         
+                        # 💡 [적용점] [증빙자료_아카이브] 내부의 모든 폴더 맵핑을 떠서 사람이름 폴더가 어디에 있든 찾아냄!
+                        folder_map = get_all_subfolders_map(drive_service, archive_id)
+                        
                         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
                             for person_name in st.session_state.dream_team:
-                                person_q = f"name='{person_name}' and '{archive_id}' in parents and trashed=false"
-                                person_res = drive_service.files().list(q=person_q, fields="files(id)").execute()
-                                
-                                if person_res.get('files'):
-                                    person_folder_id = person_res['files'][0]['id']
-                                    pdf_q = f"'{person_folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-                                    pdf_res = drive_service.files().list(q=pdf_q, fields="files(id, name)").execute()
+                                if person_name in folder_map:
+                                    person_folder_id = folder_map[person_name]
                                     
-                                    for pdf_file in pdf_res.get('files', []):
-                                        request = drive_service.files().get_media(fileId=pdf_file['id'])
-                                        fh = io.BytesIO()
-                                        downloader = MediaIoBaseDownload(fh, request)
-                                        done = False
-                                        while not done: _, done = downloader.next_chunk()
-                                        fh.seek(0)
-                                        z.writestr(f"{person_name}/{pdf_file['name']}", fh.read())
-                                        found_files_count += 1
+                                    # 해당 기술자 폴더 내부를 끝까지 파고들어(재귀) 모든 PDF 수집
+                                    person_pdfs = get_all_pdfs_recursively(drive_service, person_folder_id)
+                                    
+                                    if person_pdfs:
+                                        for pdf_file in person_pdfs:
+                                            request = drive_service.files().get_media(fileId=pdf_file['id'])
+                                            fh = io.BytesIO()
+                                            downloader = MediaIoBaseDownload(fh, request)
+                                            done = False
+                                            while not done: _, done = downloader.next_chunk()
+                                            fh.seek(0)
+                                            z.writestr(f"{person_name}/{pdf_file['name']}", fh.read())
+                                            found_files_count += 1
+                                    else:
+                                        z.writestr(f"{person_name}/안내_서류없음.txt", "폴더는 있으나 내부에 PDF 서류가 없습니다.".encode('utf-8'))
                                 else:
-                                    z.writestr(f"{person_name}/안내_서류없음.txt", f"구글 드라이브에 '{person_name}' 폴더가 없습니다.".encode('utf-8'))
+                                    z.writestr(f"{person_name}/안내_폴더없음.txt", f"구글 드라이브에 '{person_name}' 폴더가 어디에도 없습니다.".encode('utf-8'))
                         
                         zip_buffer.seek(0)
                         if found_files_count > 0:
-                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF 서류를 패키징했습니다.")
+                            st.success(f"🎉 성공! 총 {found_files_count}개의 증빙 PDF를 전방위 탐색으로 찾아 압축했습니다.")
                             st.download_button("📦 최종 제출서류 패키지 다운로드 (ZIP)", data=zip_buffer, file_name="최종_PQ제출서류_패키지.zip", mime="application/zip", type="primary")
                         else: st.warning("선발된 인원에 해당하는 PDF 서류를 찾지 못했습니다.")
                 except Exception as e: st.error(f"서류 패키징 중 오류 발생: {e}")
