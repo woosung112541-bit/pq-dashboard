@@ -27,6 +27,7 @@ if 'auto_settings' not in st.session_state:
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
+if 'self_eval_template' not in st.session_state: st.session_state.self_eval_template = "" # 💡 엑셀 템플릿 저장용 메모리
 if 'final_pq_score_table' not in st.session_state: st.session_state.final_pq_score_table = pd.DataFrame()
 
 with st.sidebar:
@@ -88,27 +89,28 @@ def load_master_db_from_drive():
         if df.empty: load_master_db_from_drive.clear()
         return df
         
-    except Exception as e:
+    except Exception:
         load_master_db_from_drive.clear()
         return pd.DataFrame()
 
-def get_all_pdfs_recursively(drive_service, folder_id, depth=0):
+# 💡 [변경] PDF뿐만 아니라 Excel 파일도 재귀적으로 가져오도록 업그레이드
+def get_all_files_recursively(drive_service, folder_id, target_mime_types, depth=0):
     if depth > 5: return [] 
-    pdfs = []
+    found_files = []
     query = f"'{folder_id}' in parents and trashed=false"
     page_token = None
     while True:
         try:
             response = drive_service.files().list(q=query, fields='nextPageToken, files(id, name, mimeType)', pageToken=page_token).execute()
             for file in response.get('files', []):
-                if file['mimeType'] == 'application/pdf':
-                    pdfs.append(file)
+                if file['mimeType'] in target_mime_types:
+                    found_files.append(file)
                 elif file['mimeType'] == 'application/vnd.google-apps.folder':
-                    pdfs.extend(get_all_pdfs_recursively(drive_service, file['id'], depth + 1))
+                    found_files.extend(get_all_files_recursively(drive_service, file['id'], target_mime_types, depth + 1))
             page_token = response.get('nextPageToken', None)
             if not page_token: break
         except Exception: break
-    return pdfs
+    return found_files
 
 def get_all_subfolders_map(drive_service, root_id, depth=0):
     if depth > 5: return {}
@@ -141,7 +143,8 @@ def scan_drive_archive_cached():
         
         archive_status = {}
         for folder in res_sub.get('files', []):
-            all_pdfs = get_all_pdfs_recursively(drive_service, folder['id'])
+            # 기술인 폴더는 PDF만 스캔
+            all_pdfs = get_all_files_recursively(drive_service, folder['id'], ['application/pdf'])
             archive_status[folder['name']] = [f['name'] for f in all_pdfs]
         return archive_status
     except Exception: return {"시스템 스캔 오류 (새로고침을 눌러주세요)": []}
@@ -157,8 +160,7 @@ def get_target_project_folders(drive_service):
         q_sub = f"'{target_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
         res_sub = drive_service.files().list(q=q_sub, fields="files(id, name)").execute()
         return {f['name']: f['id'] for f in res_sub.get('files', [])}
-    except Exception as e:
-        return {}
+    except Exception: return {}
 
 def get_ai_model():
     return genai.GenerativeModel('gemini-3.6-flash')
@@ -167,7 +169,7 @@ def get_ai_model():
 # 🧠 [Backend Engine] AI 다이렉트 100점 만점 시뮬레이션 엔진
 # ==========================================
 class PQScoringEngine:
-    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text):
+    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, self_eval_template):
         master_db = load_master_db_from_drive()
         if master_db.empty:
             st.error("❌ 구글 드라이브에서 '마스터'라는 이름이 포함된 엑셀 파일을 찾을 수 없습니다.")
@@ -177,34 +179,36 @@ class PQScoringEngine:
         available_engineers = list(scan_drive_archive_cached().keys())
         engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
         
-        # 💡 [핵심 개조] 고정된 뼈대를 제거하고 PDF 안의 표 구조를 스스로 복제하도록 지시!
+        # 💡 [핵심] 엑셀 템플릿 강제 반영 및 "직접 입력 필요" 조건 추가
         prompt = f"""
-        당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
-        아래 [업로드된 공고문/자기평가서 텍스트]와 [엔지니어 실적 Master DB]를 분석하여 최적의 '드림팀'을 선발하고, 평가 점수 산출표를 작성하세요.
+        당신은 건설엔지니어링 PQ 최고 심사위원입니다.
+        아래 제공된 [공고문 텍스트(PDF)], [자기평가표 양식(Excel)], [엔지니어 실적 Master DB]를 융합 분석하여 최적의 드림팀과 평가 점수표를 산출하세요.
 
-        [★★★★★ 절대 준수 최우선 규칙: 실제 자기평가서 표 '동적' 완벽 미러링]
-        제가 임의의 고정된 서식을 주지 않겠습니다. 당신은 **무조건 업로드된 텍스트 내용 안에서 '자기평가서(표)'의 실제 계층 구조(Hierarchy)를 스스로 파악하여 100% 똑같이 복제**해야 합니다.
-        (예: PDF 텍스트에 '참여기술인' 하위에 '경력'이 있고, 그 하위에 '사업책임/분야별책임/분야별참여'가 있는 구조라면, 당신의 JSON 출력 결과도 이 순서와 계층을 그대로 따라야 합니다. 임의로 카테고리 순서를 뒤바꾸거나 합치지 마세요.)
+        [★★★★★ 절대 준수 4대 규칙]
+        1. **완벽한 서식 미러링:** 반환하는 JSON "pq_score_table"은 아래 제공된 [자기평가표 양식(Excel)]의 행/열 구조와 배점을 토씨 하나 틀리지 말고 100% 똑같이 유지하세요. 당신은 획득점수와 계산근거만 채웁니다.
+        2. **데이터 부재 시 "직접 입력 필요":** 마스터 DB를 조회했을 때 실적 데이터(백파일)가 없거나 산출 근거를 도저히 계산할 수 없는 항목은 억지로 점수를 부여하지 마세요! 획득점수를 빈칸(또는 0)으로 두고, 점수계산근거에 반드시 **"직접 입력 필요"**라고 적으세요.
+        3. **만점 환각(Hallucination) 금지:** DB에 실적이 있다면 반드시 '실제 건수/금액'을 바탕으로 공고문 기준에 따라 깎을 건 깎으세요. 근거에 실제 수치를 적어야 합니다.
+        4. **신용도 BB- 고정 강제:** 당사의 기업신용등급은 **'BB-'** 입니다. 신용도 배점에서 BB-에 해당하는 실제 점수를 무조건 감점 처리하세요.
 
-        [평가 핵심 지침]
-        1. 후보군 제한: 반드시 다음 명단에 있는 기술자들 중에서만 선발하세요: [{engineers_str}].
-        2. 기업 신용도 고정: 당사의 신용평가등급은 **'BB-'** 입니다. 세부 점수 기준에서 BB-에 해당하는 실제 점수를 무조건 감점 적용하세요. (절대 만점 부여 금지)
-        3. 엄격한 실적 계산: 제공된 DB의 '인정일수', '건수', '금액' 등을 철저히 계산하세요. 계산하기 귀찮다고 대충 만점을 주면 절대 안 됩니다. 기준 미달 시 반드시 공고문 산식에 따라 감점 처리하고, 계산근거에 실제 데이터 수치를 적으세요.
-        4. 기간 필터링: 공고 기간을 2026년 기준으로 환산하여 유효 실적만 인정하세요.
-        5. 요구 인원: 사책(PM) {pm_cnt}명, 분책(PE) {pe_cnt}명, 분참(PES) {pes_cnt}명.
+        [후보군 및 조건]
+        - 가용 기술자 명단: [{engineers_str}]
+        - 필요 인원: 사책 {pm_cnt}명, 분책 {pe_cnt}명, 분참 {pes_cnt}명 (기간은 2026년 기준 3년 환산)
 
-        [업로드된 공고문/자기평가서 전체 텍스트]
+        [공고문 전체 텍스트 (세부기준)]
         {notice_text[:7000]} 
+
+        [자기평가표 양식 (Excel 템플릿 내용)]
+        {self_eval_template}
 
         [엔지니어 실적 Master DB (CSV 형식)]
         {db_csv}
 
-        분석 결과를 오직 아래 JSON 포맷으로만 반환하세요. "pq_score_table" 내부의 키(분류명)는 실제 표 구조에 맞춰 유동적으로 생성하되, '배점(숫자)', '획득점수(숫자)', '점수계산근거'는 반드시 포함하세요.
+        분석 결과를 오직 아래 JSON 포맷으로만 반환하세요.
         {{
             "pq_score_table": [
-                {{"대분류": "참여기술인", "중분류": "경력", "항목": "사업책임", "배점": 9.0, "획득점수": 7.2, "점수계산근거": "[이름] 인정일수 부족으로 감점"}},
-                {{"대분류": "신용도", "중분류": "재정상태 건실도", "항목": "계", "배점": 10.0, "획득점수": 9.0, "점수계산근거": "신용등급 BB- 적용"}}
-                // ... 텍스트에 나타난 실제 자기평가표의 모든 항목(가점, 감점 포함)을 빠짐없이, 계층 순서대로 반영할 것
+                {{"분류": "...", "세부평가항목": "...", "배점": "...", "획득점수": 0, "점수계산근거": "직접 입력 필요"}},
+                {{"분류": "...", "세부평가항목": "...", "배점": "...", "획득점수": 4.5, "점수계산근거": "건수 5건 확인 적용"}},
+                {{"분류": "신용도", "세부평가항목": "재정상태 건실도", "배점": 3, "획득점수": 1.5, "점수계산근거": "신용등급 BB- 적용"}}
             ],
             "pm": ["선발된 이름1"],
             "pe": ["선발된 이름2", "선발된 이름3"],
@@ -230,7 +234,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 엄격 통제 모드: 실제 PDF 서식 완전 동적 복제 및 BB- 신용도 절대 고정")
+st.caption("※ 엑셀(자기평가표) 완벽 미러링 지원 및 '직접 입력 필요' 검증 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -240,72 +244,100 @@ with tab1:
     with col1:
         st.subheader("Zone A: 공고문/지침서 분석")
         
-        upload_method = st.radio("공고문 입력 방식", ["☁️ 구글 드라이브 '작성대상' 폴더에서 선택", "📤 직접 드래그 앤 드롭"], horizontal=True)
+        upload_method = st.radio("입력 방식", ["☁️ 구글 드라이브 '작성대상' 폴더에서 선택", "📤 직접 드래그 앤 드롭 (PDF + Excel)"], horizontal=True)
         
         notice_text_temp = ""
+        self_eval_template_temp = ""
         ready_to_analyze = False
         
-        if upload_method == "📤 직접 드래그 앤 드롭":
-            notice_files = st.file_uploader("작성 안내서, 자기평가서, 세부기준 등 PDF 업로드", type=['pdf'], accept_multiple_files=True)
-            if notice_files and api_key and st.button("🧠 업로드한 공고 AI 분석", type="primary"):
-                with st.spinner("PDF 문서를 읽는 중..."):
+        if upload_method == "📤 직접 드래그 앤 드롭 (PDF + Excel)":
+            # 💡 [변경] 파일 업로더에서 PDF와 Excel을 모두 허용합니다.
+            notice_files = st.file_uploader("안내서/세부기준(PDF) 및 자기평가표 양식(Excel) 업로드", type=['pdf', 'xlsx', 'xls'], accept_multiple_files=True)
+            if notice_files and api_key and st.button("🧠 업로드한 공고/엑셀 AI 분석", type="primary"):
+                with st.spinner("문서를 읽고 엑셀 서식을 파악하는 중..."):
                     for file in notice_files:
-                        pdf = PyPDF2.PdfReader(file)
-                        for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                        if file.name.lower().endswith('.pdf'):
+                            pdf = PyPDF2.PdfReader(file)
+                            for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                        elif file.name.lower().endswith(('.xlsx', '.xls')):
+                            df_excel = pd.read_excel(file)
+                            self_eval_template_temp += f"\n--- [{file.name}] ---\n" + df_excel.to_csv(index=False)
                     ready_to_analyze = True
                     
-        else:
+        else: # ☁️ 드라이브 선택 모드
             if api_key:
                 drive_service = authenticate_google_drive()
                 if drive_service:
                     project_folders = get_target_project_folders(drive_service)
                     if not project_folders:
-                        st.info("💡 구글 드라이브에 `작성대상` 폴더가 없거나, 하위 공고 폴더가 비어있습니다.")
+                        st.info("💡 구글 드라이브에 `작성대상` 폴더가 없거나 비어있습니다.")
                     else:
                         selected_project_name = st.selectbox("분석할 공고(프로젝트) 폴더를 선택하세요:", list(project_folders.keys()))
                         if st.button("🧠 선택한 공고 AI 분석", type="primary"):
-                            with st.spinner(f"'{selected_project_name}' 폴더의 모든 PDF를 읽어오는 중..."):
+                            with st.spinner(f"폴더 안의 PDF 및 Excel 양식을 모두 읽어오는 중..."):
                                 target_id = project_folders[selected_project_name]
-                                pdf_files = get_all_pdfs_recursively(drive_service, target_id, depth=1)
+                                # 💡 [변경] 폴더 내부의 PDF와 스프레드시트(엑셀)를 모두 스캔
+                                target_mime_types = [
+                                    'application/pdf', 
+                                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                    'application/vnd.ms-excel',
+                                    'application/vnd.google-apps.spreadsheet'
+                                ]
+                                doc_files = get_all_files_recursively(drive_service, target_id, target_mime_types, depth=1)
                                 
-                                if not pdf_files:
-                                    st.warning("선택한 폴더 안에 PDF 파일이 없습니다.")
+                                if not doc_files:
+                                    st.warning("선택한 폴더 안에 문서가 없습니다.")
                                 else:
-                                    for pdf_file in pdf_files:
-                                        request = drive_service.files().get_media(fileId=pdf_file['id'])
-                                        fh = io.BytesIO()
-                                        downloader = MediaIoBaseDownload(fh, request)
-                                        done = False
-                                        while not done: _, done = downloader.next_chunk()
-                                        fh.seek(0)
-                                        pdf = PyPDF2.PdfReader(fh)
-                                        for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                                    for doc in doc_files:
+                                        if doc['mimeType'] == 'application/pdf':
+                                            request = drive_service.files().get_media(fileId=doc['id'])
+                                            fh = io.BytesIO()
+                                            downloader = MediaIoBaseDownload(fh, request)
+                                            done = False
+                                            while not done: _, done = downloader.next_chunk()
+                                            fh.seek(0)
+                                            pdf = PyPDF2.PdfReader(fh)
+                                            for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
+                                        else:
+                                            # 구글 시트 또는 엑셀인 경우
+                                            if doc['mimeType'] == 'application/vnd.google-apps.spreadsheet':
+                                                request = drive_service.files().export_media(fileId=doc['id'], mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                                            else:
+                                                request = drive_service.files().get_media(fileId=doc['id'])
+                                            fh = io.BytesIO()
+                                            downloader = MediaIoBaseDownload(fh, request)
+                                            done = False
+                                            while not done: _, done = downloader.next_chunk()
+                                            fh.seek(0)
+                                            df_excel = pd.read_excel(fh)
+                                            self_eval_template_temp += f"\n--- [{doc['name']}] ---\n" + df_excel.to_csv(index=False)
                                     ready_to_analyze = True
         
-        if ready_to_analyze and notice_text_temp:
-            with st.spinner("AI가 공고문을 정독하며 세부기준과 자기평가서 양식을 매칭 중입니다..."):
+        if ready_to_analyze:
+            with st.spinner("AI가 공고문을 정독하며 세부기준을 엑셀 양식과 매칭 중입니다..."):
                 try:
                     st.session_state.notice_text = notice_text_temp
+                    st.session_state.self_eval_template = self_eval_template_temp
                     
                     prompt = f"""
-                    건설엔지니어링 PQ 공고문 텍스트 분석 후 순수 JSON만 반환.
-                    1. eval_criteria: 배점표 배열
+                    건설엔지니어링 PQ 텍스트/엑셀 분석 후 순수 JSON만 반환.
+                    1. eval_criteria: 배점표 배열 (대략적인 요약)
                     2. settings: {{ has_safety(bool), period(str), bohal(list), pm_cnt(int), pe_cnt(int), pes_cnt(int), extra_settings: {{"특이사항명": "내용"}} }}
-                    * 중요: 텍스트 안에 혼재된 '작성안내서', '제출서류', '세부점수기준', '자기평가서'의 맥락을 정확히 구분하고, 자기평가서 작성에 필요한 모든 가/감점 특이사항을 extra_settings에 추출하세요.
                     공고문 텍스트: {notice_text_temp}
+                    자기평가서 엑셀 구조: {self_eval_template_temp}
                     """
                     response = get_ai_model().generate_content(prompt)
                     parsed_json = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
                     
                     st.session_state.eval_criteria = pd.DataFrame(parsed_json.get("eval_criteria", []))
                     st.session_state.auto_settings = parsed_json.get("settings", st.session_state.auto_settings)
-                    st.success("✅ 분석 완료! 세부기준 및 양식이 [Tab 2]와 메모리에 저장되었습니다.")
+                    st.success("✅ 분석 완료! 엑셀 양식 구조와 세부 기준이 메모리에 완벽히 저장되었습니다.")
                 except Exception as e:
-                    st.error(f"공고문 분석 실패: {e}")
+                    st.error(f"분석 실패: {e}")
                         
     with col2:
         st.subheader("Zone B: '기술인' 폴더 실적 아카이브 현황")
-        st.info("💡 실적증명서 및 수료증 PDF는 구글 드라이브 `기술인` 폴더 내 개인별 폴더에 자유롭게 업로드하시면 됩니다.")
+        st.info("💡 실적증명서 및 수료증 PDF는 구글 드라이브 `기술인` 폴더 내에 업로드하시면 됩니다.")
         if st.button("🔍 구글 드라이브 아카이브 현황 새로고침"):
             scan_drive_archive_cached.clear()
             load_master_db_from_drive.clear()
@@ -331,7 +363,7 @@ with tab2:
     with col_toggle: manual_override = st.toggle("⚙️ 세부사항 수동 설정", value=False)
 
     if not st.session_state.eval_criteria.empty: st.table(st.session_state.eval_criteria)
-    else: st.info("💡 [Tab 1]에서 공고문을 업로드하시면 평가 배점표가 자동으로 구성됩니다.")
+    else: st.info("💡 [Tab 1]에서 공고문/엑셀을 업로드하시면 평가 배점표가 자동으로 구성됩니다.")
     
     st.markdown("---")
     s_settings = st.session_state.auto_settings
@@ -359,10 +391,8 @@ with tab2:
         
         st.markdown("##### 📌 공고문 특이/세부사항 (AI 자동 추출)")
         if extra_settings:
-            for k, v in extra_settings.items():
-                st.info(f"**{k}** : {v}")
-        else:
-            st.caption("별도의 특이사항이 발견되지 않았습니다.")
+            for k, v in extra_settings.items(): st.info(f"**{k}** : {v}")
+        else: st.caption("별도의 특이사항이 발견되지 않았습니다.")
             
     else:
         st.warning("⚠️ 수동 설정 모드입니다.")
@@ -370,12 +400,10 @@ with tab2:
         sel_period = st.selectbox("↳ 인정 기간", ["1년", "3년", "5년", "7년", "제한없음"], index=1)
         st.write("**✅ 보할 설정**")
         edited_bohal = st.data_editor(pd.DataFrame(bohal_data), num_rows="dynamic")
-        
         col_pm, col_pe, col_pes = st.columns(3)
         with col_pm: final_pm_cnt = st.number_input("사책(명)", value=s_settings.get('pm_cnt', 1))
         with col_pe: final_pe_cnt = st.number_input("분책(명)", value=s_settings.get('pe_cnt', 0))
         with col_pes: final_pes_cnt = st.number_input("분참(명)", value=s_settings.get('pes_cnt', 0))
-        
         st.markdown("##### 📌 특이/세부사항 수동 편집")
         extra_df = pd.DataFrame(list(extra_settings.items()), columns=["항목명", "내용"])
         edited_extra = st.data_editor(extra_df, num_rows="dynamic", use_container_width=True)
@@ -383,17 +411,17 @@ with tab2:
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
     st.markdown("### 🏆 최종 시뮬레이션 및 엄격한 점수 산출")
-    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (자기평가서 완벽 미러링)", type="primary"):
-        if not st.session_state.notice_text:
-            st.warning("⚠️ [Tab 1]에서 공고문을 먼저 분석해야 해당 기준에 맞는 연산이 가능합니다!")
+    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (엑셀 자기평가표 미러링)", type="primary"):
+        if not st.session_state.notice_text or not st.session_state.self_eval_template:
+            st.warning("⚠️ [Tab 1]에서 공고문(PDF)과 자기평가표(Excel)를 먼저 분석해야 합니다!")
         else:
-            with st.spinner('AI가 실제 공고문의 자기평가서 계층 구조(Hierarchy)를 스캔하여 똑같이 표를 생성하고 실점수를 계산 중입니다... (약 15초 소요)'):
+            with st.spinner('AI가 엑셀 양식을 복제하고 데이터 부재 항목은 "직접 입력 필요"로 분류하며 연산 중입니다... (약 15초 소요)'):
                 best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
-                    final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text
+                    final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text, st.session_state.self_eval_template
                 )
                 
                 if not best_score_df.empty:
-                    st.success("🎉 AI 자기평가서 실점수 산출 및 표 동적 작성 완료!")
+                    st.success("🎉 AI 엑셀 기반 자기평가서 실점수 산출 완료!")
                     
                     best_score_df['배점_num'] = pd.to_numeric(best_score_df['배점'], errors='coerce')
                     best_score_df['획득점수_num'] = pd.to_numeric(best_score_df['획득점수'], errors='coerce')
@@ -406,7 +434,14 @@ with tab3:
                     col2.metric("최종 획득 점수", f"{total_earned:g}점")
                     
                     display_df = best_score_df.drop(columns=['배점_num', '획득점수_num'])
-                    st.dataframe(display_df, use_container_width=True)
+                    
+                    # '직접 입력 필요'가 들어간 행을 노란색으로 하이라이트하는 스타일 적용
+                    def highlight_manual_input(row):
+                        if '직접 입력 필요' in str(row.get('점수계산근거', '')):
+                            return ['background-color: #ffe6e6'] * len(row)
+                        return [''] * len(row)
+                        
+                    st.dataframe(display_df.style.apply(highlight_manual_input, axis=1), use_container_width=True)
                     st.session_state.final_pq_score_table = display_df
                     
                     st.session_state.dream_team = rec_pm + rec_pe + rec_pes
@@ -444,7 +479,7 @@ with tab4:
                             for person_name in st.session_state.dream_team:
                                 if person_name in folder_map:
                                     person_folder_id = folder_map[person_name]
-                                    person_pdfs = get_all_pdfs_recursively(drive_service, person_folder_id)
+                                    person_pdfs = get_all_pdfs_recursively(drive_service, person_folder_id, ['application/pdf'])
                                     
                                     if person_pdfs:
                                         for pdf_file in person_pdfs:
