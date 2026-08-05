@@ -23,7 +23,7 @@ if 'auto_settings' not in st.session_state:
         "has_safety": True, "period": "3년",
         "bohal": [{"전문분야": "상하수도", "비율(%)": 60}, {"전문분야": "토질지질", "비율(%)": 40}],
         "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2,
-        "extra_settings": {} # 💡 [신규] 공고문만의 특이사항을 무한대로 담을 주머니
+        "extra_settings": {}
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
@@ -54,26 +54,47 @@ def authenticate_google_drive():
         st.error(f"구글 드라이브 인증 실패: {e}")
         return None
 
+# 💡 [핵심 수정] 무조건 파일을 찾아내는 똑똑한 마스터 DB 로더
 @st.cache_data(ttl=300)
 def load_master_db_from_drive():
     try:
         drive_service = authenticate_google_drive()
         if not drive_service: return pd.DataFrame()
+        
+        # 확장자(MIME) 제한을 풀고 이름에 '마스터'가 들어간 파일 탐색
         results = drive_service.files().list(
-            q="name contains '마스터' and mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' and trashed=false",
-            fields="files(id, name)"
+            q="name contains '마스터' and trashed=false",
+            fields="files(id, name, mimeType)"
         ).execute()
         items = results.get('files', [])
-        if not items: return pd.DataFrame()
         
-        request = drive_service.files().get_media(fileId=items[0]['id'])
+        if not items:
+            load_master_db_from_drive.clear() # 못 찾으면 캐시(헛된 기억) 삭제
+            return pd.DataFrame()
+        
+        file_id = items[0]['id']
+        mime_type = items[0].get('mimeType', '')
+        
+        # 구글 스프레드시트로 임의 변환된 경우 엑셀 포맷으로 강제 내보내기(Export)
+        if mime_type == 'application/vnd.google-apps.spreadsheet':
+            request = drive_service.files().export_media(fileId=file_id, mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        else:
+            request = drive_service.files().get_media(fileId=file_id)
+            
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while done is False: _, done = downloader.next_chunk()
         fh.seek(0)
-        return pd.read_excel(fh)
+        
+        df = pd.read_excel(fh)
+        if df.empty:
+            load_master_db_from_drive.clear() # 파일이 비어있어도 캐시 삭제
+        return df
+        
     except Exception as e:
+        st.error(f"마스터 DB 다운로드/읽기 오류: {e}")
+        load_master_db_from_drive.clear() # 에러 나면 캐시 즉시 삭제
         return pd.DataFrame()
 
 def get_all_pdfs_recursively(drive_service, folder_id, depth=0):
@@ -137,15 +158,14 @@ def get_ai_model():
 # 🧠 [Backend Engine] AI 다이렉트 시뮬레이션 엔진
 # ==========================================
 class PQScoringEngine:
-    def __init__(self):
-        self.master_db = load_master_db_from_drive()
-
     def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text):
-        if self.master_db.empty:
-            st.error("구글 드라이브에서 마스터 DB 엑셀 파일을 찾을 수 없습니다.")
+        # 💡 [핵심 수정] 시뮬레이션 버튼을 누르는 즉시 마스터 DB를 실시간으로 가져옵니다!
+        master_db = load_master_db_from_drive()
+        if master_db.empty:
+            st.error("❌ 구글 드라이브에서 '마스터'라는 이름이 포함된 엑셀 파일을 찾을 수 없습니다. 드라이브에 파일이 있는지 확인해 주세요.")
             return pd.DataFrame(), [], [], []
             
-        db_csv = self.master_db.to_csv(index=False)
+        db_csv = master_db.to_csv(index=False)
         prompt = f"""
         당신은 건설엔지니어링 PQ(사업수행능력평가) 최고 심사위원입니다.
         아래 [공고문 세부기준]과 [엔지니어 실적 Master DB]를 분석하여, PQ 총점이 가장 높은 최적의 '드림팀'을 선발하세요.
@@ -165,7 +185,7 @@ class PQScoringEngine:
         위 데이터를 종합적으로 연산하여, 선발된 인원 조합과 점수 산출 내역을 아래 JSON 포맷으로만 반환하세요.
         {{
             "best_score_df": [
-                {{"평가항목": "사업책임기술자", "배점": 30, "획득점수": 29.5, "비고": "윤석순 (가점 반영)"}}
+                {{"평가항목": "사업책임기술자", "배점": 30, "획득점수": 29.5, "비고": "이름 (가점 반영)"}}
             ],
             "pm": ["이름1"],
             "pe": ["이름2", "이름3"],
@@ -190,7 +210,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend] 메인 대시보드 UI
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 실무 완벽 대응: 공고문 특이사항 무한 자동 생성 + 에러 철통 방어 탑재")
+st.caption("※ 실무 완벽 대응: 공고문 특이사항 추출 + 스마트 DB 스캐너 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 책임기술자 시뮬레이션", "🖨️ 4. 서류 출력 및 패키징"])
 
@@ -210,7 +230,6 @@ with tab1:
                     
                     st.session_state.notice_text = notice_text
                     
-                    # 💡 [핵심] AI에게 지정된 항목 외에 '특이사항(extra_settings)'을 스스로 찾아 추가하라고 지시
                     prompt = f"""
                     건설엔지니어링 PQ 공고문 분석 후 순수 JSON만 반환하세요.
                     1. eval_criteria: 배점표 배열
@@ -263,12 +282,10 @@ with tab2:
     st.markdown("---")
     s_settings = st.session_state.auto_settings
     
-    # 💡 [핵심 방어막] 보할 데이터가 없거나 엉뚱해도 에러 없이 빈 칸 처리
     bohal_data = s_settings.get('bohal', [])
     if not isinstance(bohal_data, list) or len(bohal_data) == 0: 
         bohal_data = [{"전문분야": "해당없음", "비율(%)": 0}]
 
-    # 💡 [신규] 공고문에서 알아서 찾아낸 특이/세부사항들
     extra_settings = s_settings.get('extra_settings', {})
     if not isinstance(extra_settings, dict): extra_settings = {"기타사항": str(extra_settings)}
 
@@ -285,7 +302,6 @@ with tab2:
             
         final_pm_cnt, final_pe_cnt, final_pes_cnt = s_settings.get('pm_cnt', 1), s_settings.get('pe_cnt', 0), s_settings.get('pes_cnt', 0)
         
-        # 특이사항 동적 렌더링
         st.markdown("##### 📌 공고문 특이/세부사항 (AI 자동 추출)")
         if extra_settings:
             for k, v in extra_settings.items():
