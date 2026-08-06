@@ -27,7 +27,7 @@ if 'auto_settings' not in st.session_state:
     }
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
-if 'self_eval_template' not in st.session_state: st.session_state.self_eval_template = "" # 💡 엑셀 템플릿 저장용 메모리
+if 'self_eval_template' not in st.session_state: st.session_state.self_eval_template = ""
 if 'final_pq_score_table' not in st.session_state: st.session_state.final_pq_score_table = pd.DataFrame()
 
 with st.sidebar:
@@ -93,7 +93,6 @@ def load_master_db_from_drive():
         load_master_db_from_drive.clear()
         return pd.DataFrame()
 
-# 💡 [변경] PDF뿐만 아니라 Excel 파일도 재귀적으로 가져오도록 업그레이드
 def get_all_files_recursively(drive_service, folder_id, target_mime_types, depth=0):
     if depth > 5: return [] 
     found_files = []
@@ -143,7 +142,6 @@ def scan_drive_archive_cached():
         
         archive_status = {}
         for folder in res_sub.get('files', []):
-            # 기술인 폴더는 PDF만 스캔
             all_pdfs = get_all_files_recursively(drive_service, folder['id'], ['application/pdf'])
             archive_status[folder['name']] = [f['name'] for f in all_pdfs]
         return archive_status
@@ -179,7 +177,6 @@ class PQScoringEngine:
         available_engineers = list(scan_drive_archive_cached().keys())
         engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
         
-        # 💡 [핵심] 엑셀 템플릿 강제 반영 및 "직접 입력 필요" 조건 추가
         prompt = f"""
         당신은 건설엔지니어링 PQ 최고 심사위원입니다.
         아래 제공된 [공고문 텍스트(PDF)], [자기평가표 양식(Excel)], [엔지니어 실적 Master DB]를 융합 분석하여 최적의 드림팀과 평가 점수표를 산출하세요.
@@ -251,7 +248,6 @@ with tab1:
         ready_to_analyze = False
         
         if upload_method == "📤 직접 드래그 앤 드롭 (PDF + Excel)":
-            # 💡 [변경] 파일 업로더에서 PDF와 Excel을 모두 허용합니다.
             notice_files = st.file_uploader("안내서/세부기준(PDF) 및 자기평가표 양식(Excel) 업로드", type=['pdf', 'xlsx', 'xls'], accept_multiple_files=True)
             if notice_files and api_key and st.button("🧠 업로드한 공고/엑셀 AI 분석", type="primary"):
                 with st.spinner("문서를 읽고 엑셀 서식을 파악하는 중..."):
@@ -276,7 +272,6 @@ with tab1:
                         if st.button("🧠 선택한 공고 AI 분석", type="primary"):
                             with st.spinner(f"폴더 안의 PDF 및 Excel 양식을 모두 읽어오는 중..."):
                                 target_id = project_folders[selected_project_name]
-                                # 💡 [변경] 폴더 내부의 PDF와 스프레드시트(엑셀)를 모두 스캔
                                 target_mime_types = [
                                     'application/pdf', 
                                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -299,7 +294,6 @@ with tab1:
                                             pdf = PyPDF2.PdfReader(fh)
                                             for page in pdf.pages[:15]: notice_text_temp += page.extract_text() or ""
                                         else:
-                                            # 구글 시트 또는 엑셀인 경우
                                             if doc['mimeType'] == 'application/vnd.google-apps.spreadsheet':
                                                 request = drive_service.files().export_media(fileId=doc['id'], mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                                             else:
@@ -435,7 +429,6 @@ with tab3:
                     
                     display_df = best_score_df.drop(columns=['배점_num', '획득점수_num'])
                     
-                    # '직접 입력 필요'가 들어간 행을 노란색으로 하이라이트하는 스타일 적용
                     def highlight_manual_input(row):
                         if '직접 입력 필요' in str(row.get('점수계산근거', '')):
                             return ['background-color: #ffe6e6'] * len(row)
@@ -479,7 +472,7 @@ with tab4:
                             for person_name in st.session_state.dream_team:
                                 if person_name in folder_map:
                                     person_folder_id = folder_map[person_name]
-                                    person_pdfs = get_all_pdfs_recursively(drive_service, person_folder_id, ['application/pdf'])
+                                    person_pdfs = get_all_files_recursively(drive_service, person_folder_id, ['application/pdf'])
                                     
                                     if person_pdfs:
                                         for pdf_file in person_pdfs:
