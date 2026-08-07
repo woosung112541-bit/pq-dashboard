@@ -26,18 +26,15 @@ if 'auto_settings' not in st.session_state:
         "extra_settings": {}
     }
 if 'semi_fixed' not in st.session_state:
-    # 회사 단위로 "거의 고정"이지만 시점에 따라 바뀔 수 있는 값들.
-    # 과거에는 신용등급(BB-) 하나만 프롬프트에 하드코딩했으나, 매 실행마다
-    # 사용자가 직접 확인하고 넘어가도록 UI 입력값으로 전환한다.
     st.session_state.semi_fixed = {
-        "credit_rating": "BB-",       # 재정상태 건실도 산정 기준
-        "penalty_points": "해당없음",   # 참여업체·기술인 벌점
-        "new_hire_rate": 0.0,          # 건설기술인 신규고용율 (%)
-        "overlap_level": "최저",        # 업무중첩도 구간: 최저/중간/최고 중 선택
-        "investment_ratio": 0.0,       # 기술개발투자실적 비율 (%)
-        "patent_tech_count": 0,        # 건설신기술·특허 활용 건수
-        "bid_restriction": "해당없음",  # 입찰참가제한·업무정지
-        "inspection_penalty": "해당없음",  # 점검·진단 실시결과 처분 이력
+        "credit_rating": "BB-",       
+        "penalty_points": "해당없음",   
+        "new_hire_rate": 0.0,          
+        "overlap_level": "최저",        
+        "investment_ratio": 0.0,       
+        "patent_tech_count": 0,        
+        "bid_restriction": "해당없음",  
+        "inspection_penalty": "해당없음",  
     }
 if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
@@ -199,9 +196,9 @@ class PQScoringEngine:
         [★★★★★ 절대 준수 규칙]
         1. **완벽한 서식 미러링:** 반환하는 JSON "pq_score_table"은 아래 제공된 [자기평가표 양식(Excel)]의 행/열 구조와 배점을 토씨 하나 틀리지 말고 100% 똑같이 유지하세요. 당신은 획득점수와 계산근거만 채웁니다.
         2. **데이터 부재 시 "직접 입력 필요":** 마스터 DB 및 [기술인] 드라이브 폴더 서류를 조회했을 때 실적 데이터(백파일)가 없거나 산출 근거를 도저히 계산할 수 없는 항목은 억지로 점수를 부여하지 마세요! 획득점수를 빈칸(또는 0)으로 두고, 점수계산근거에 반드시 **"직접 입력 필요"**라고 적으세요.
-        3. **만점 환각(Hallucination) 금지:** DB에 실적이 있다면 반드시 '실제 건수/금액'을 바탕으로 공고문 및 세부평가기준 상의 제한사항(최근 N년, 준공 여부, 직무분야=토목 한정, 자체안전점검 제외, 교량·터널 100%/기타토목 80% 가중치 등)을 정확히 적용해 깎을 건 깎으세요. 근거에 실제 수치와 적용한 제한조건을 적으세요.
-        4. **사용자 확인 반고정값 그대로 사용:** 아래 [사용자 확인 반고정 항목]은 회사 단위로 거의 고정이지만 시점마다 바뀔 수 있어 매번 사용자가 직접 확인한 값입니다. 당신이 임의로 추정하지 말고 주어진 값을 그대로 적용하세요.
-        5. **등급·경력·실적·유사용역수행실적은 자료 기반 자동 산출:** 위 반고정 항목에 포함되지 않은 모든 항목(등급, 경력, 실적건수/금액, 유사용역수행실적 등)은 마스터 DB와 [기술인] 드라이브 폴더의 실제 서류만 근거로 계산하세요. 유사용역수행실적은 참여기술인 개인별 실적을 합산하는 것이 아니라, 동일 계약이 여러 기술인 시트에 중복 기재된 경우 회사 단위로 한 번만 인정해야 합니다.
+        3. **만점 환각(Hallucination) 금지:** DB에 실적이 있다면 반드시 '실제 건수/금액'을 바탕으로 공고문 및 세부평가기준 상의 제한사항을 정확히 적용해 깎을 건 깎으세요. 근거에 실제 수치와 적용한 제한조건을 적으세요.
+        4. **사용자 확인 반고정값 그대로 사용:** 아래 [사용자 확인 반고정 항목]은 임의로 추정하지 말고 주어진 값을 그대로 적용하세요.
+        5. **등급·경력·실적·유사용역수행실적은 자료 기반 자동 산출:** 위 반고정 항목에 포함되지 않은 모든 항목은 마스터 DB와 [기술인] 드라이브 폴더의 실제 서류만 근거로 계산하세요. 유사용역수행실적은 회사 단위로 중복 없이 인정해야 합니다.
 
         [사용자 확인 반고정 항목]
         - 신용평가등급: {semi_fixed.get('credit_rating')}
@@ -382,8 +379,11 @@ with tab2:
     col_title, col_toggle = st.columns([7, 3])
     with col_toggle: manual_override = st.toggle("⚙️ 세부사항 수동 설정", value=False)
 
-    if not st.session_state.eval_criteria.empty: st.table(st.session_state.eval_criteria)
-    else: st.info("💡 [Tab 1]에서 공고문/엑셀을 업로드하시면 평가 배점표가 자동으로 구성됩니다.")
+    # 💡 [핵심 방어 코드] AI가 생성한 표 데이터를 모두 문자열(str)로 변환하여 PyArrow 크래시 방지!
+    if not st.session_state.eval_criteria.empty: 
+        st.table(st.session_state.eval_criteria.astype(str))
+    else: 
+        st.info("💡 [Tab 1]에서 공고문/엑셀을 업로드하시면 평가 배점표가 자동으로 구성됩니다.")
     
     st.markdown("---")
     s_settings = st.session_state.auto_settings
@@ -405,7 +405,7 @@ with tab2:
             st.write("- **기업 신용평가등급:** **BB- (절대 고정/감점 적용)**")
         with col_b:
             st.write("- **보할 인정 비율:**")
-            st.table(pd.DataFrame(bohal_data))
+            st.table(pd.DataFrame(bohal_data).astype(str))
             
         final_pm_cnt, final_pe_cnt, final_pes_cnt = s_settings.get('pm_cnt', 1), s_settings.get('pe_cnt', 0), s_settings.get('pes_cnt', 0)
         
@@ -489,7 +489,8 @@ with tab3:
                             return ['background-color: #ffe6e6'] * len(row)
                         return [''] * len(row)
                         
-                    st.dataframe(display_df.style.apply(highlight_manual_input, axis=1), use_container_width=True)
+                    # 💡 문자열 포맷팅 문제 방지를 위해 여기도 astype 적용 (스타일 에러 방지)
+                    st.dataframe(display_df.astype(str).style.apply(highlight_manual_input, axis=1), use_container_width=True)
                     st.session_state.final_pq_score_table = display_df
                     
                     st.session_state.dream_team = rec_pm + rec_pe + rec_pes
