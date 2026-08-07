@@ -27,11 +27,11 @@ if 'semi_fixed' not in st.session_state:
         "inspection_penalty": "해당없음",  
     }
 if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
-if 'col_map' not in st.session_state: st.session_state.col_map = {}
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
 if 'raw_excel_bytes' not in st.session_state: st.session_state.raw_excel_bytes = b""
 if 'final_excel_bytes' not in st.session_state: st.session_state.final_excel_bytes = b""
+if 'db_summary_cache' not in st.session_state: st.session_state.db_summary_cache = ""
 
 with st.sidebar:
     st.markdown("### 🧠 AI 엔진 설정")
@@ -41,7 +41,7 @@ with st.sidebar:
         st.success("AI 엔진 연결 완료!")
 
 # ==========================================
-# 🔑 [Google Drive 연동 및 마스터 DB 로드]
+# 🔑 [Google Drive 연동 및 파이썬 자동 연산]
 # ==========================================
 @st.cache_resource
 def authenticate_google_drive():
@@ -59,10 +59,10 @@ def authenticate_google_drive():
 def load_master_db_from_drive():
     try:
         drive_service = authenticate_google_drive()
-        if not drive_service: return pd.DataFrame()
+        if not drive_service: return {}
         results = drive_service.files().list(q="name contains '마스터' and trashed=false", fields="files(id, mimeType)").execute()
         items = results.get('files', [])
-        if not items: return pd.DataFrame()
+        if not items: return {}
         
         file_id = items[0]['id']
         mime_type = items[0].get('mimeType', '')
@@ -76,8 +76,10 @@ def load_master_db_from_drive():
         done = False
         while not done: _, done = downloader.next_chunk()
         fh.seek(0)
-        return pd.read_excel(fh)
-    except Exception: return pd.DataFrame()
+        
+        # 💡 [핵심수정] 모든 시트를 딕셔너리로 읽어옴 (시트명 = 사람이름)
+        return pd.read_excel(fh, sheet_name=None)
+    except Exception: return {}
 
 def get_all_files_recursively(drive_service, folder_id, target_mime_types, depth=0):
     if depth > 5: return [] 
@@ -126,50 +128,56 @@ def scan_drive_archive_cached():
         return archive_status
     except Exception: return {}
 
-# 💡 [핵심 엔진 1] 파이썬을 이용한 1.0/0.8 가중치 정밀 환산기 (AI 앵무새 방지용)
-def calculate_fact_data(master_df, col_map):
-    summary = "=== [파이썬 시스템 사전 계산 팩트 데이터] ===\n"
-    summary += "※ AI는 수학 계산을 절대 금지함. 아래 팩트 수치를 그대로 사용하여 세부기준 배점표 구간에서 점수만 매칭할 것.\n\n"
+# 💡 [핵심엔진 1] 파이썬을 이용한 스마트 팩트 데이터 추출기 (시트=이름, 행=건수)
+def calculate_fact_data(master_db_dict):
+    if not master_db_dict: return "마스터 DB 데이터 없음"
+    summary = "=== [파이썬 시스템 자동 산출 팩트 데이터] ===\n"
+    summary += "※ AI는 아래의 수치를 절대 임의로 변경하거나 재계산하지 말고, 오직 이 팩트 그대로 세부기준표에서 점수만 매칭할 것.\n\n"
     
-    if master_df.empty or col_map.get('name') == "선택안함":
-        return summary + "마스터 DB 데이터 또는 이름 컬럼이 없습니다."
+    for sheet_name, df in master_db_dict.items():
+        if df.empty or sheet_name.startswith('Sheet'): continue
         
-    name_col = col_map['name']
-    for name, group in master_df.groupby(name_col):
+        name = str(sheet_name).strip()
         summary += f"▶ 기술인: {name}\n"
+        summary += f" - 등급: 특급 (고정)\n" # 💡 등급은 특급으로 고정
         
-        grade = "알수없음"
-        if col_map.get('grade') != "선택안함" and col_map['grade'] in group.columns:
-            grades = group[col_map['grade']].dropna().unique()
-            if len(grades) > 0: grade = str(grades[0])
-        summary += f" - 등급: {grade}\n"
+        # 컬럼 자동 스캔 (이름이 조금 달라도 유연하게 찾음)
+        type_col = next((c for c in df.columns if any(k in str(c) for k in ['공종', '분야', '시설물', '종류', '구분'])), None)
+        days_col = next((c for c in df.columns if any(k in str(c) for k in ['일수', '참여일', '기간', '인정'])), None)
+        amt_col = next((c for c in df.columns if any(k in str(c) for k in ['금액', '백만원', '준공'])), None)
         
         total_days = 0.0
         total_count = 0.0
         total_amt = 0.0
         
-        for _, row in group.iterrows():
+        for _, row in df.iterrows():
+            # 빈 행 스킵
+            if (days_col and pd.isna(row[days_col])) and (amt_col and pd.isna(row[amt_col])):
+                continue
+                
+            # 가중치 판별
             weight = 0.8 # 기본 기타 토목 80%
-            if col_map.get('type') != "선택안함" and col_map['type'] in master_df.columns:
-                val_type = str(row[col_map['type']]).replace(' ', '')
-                if '교량' in val_type or '터널' in val_type: weight = 1.0 # 교량/터널 100%
+            if type_col and pd.notna(row[type_col]):
+                val_type = str(row[type_col]).replace(' ', '')
+                if '교량' in val_type or '터널' in val_type: weight = 1.0
                 
-            if col_map.get('days') != "선택안함" and col_map['days'] in master_df.columns:
-                try: total_days += float(row[col_map['days']]) * weight
+            # 참여일수 합산
+            if days_col and pd.notna(row[days_col]):
+                try: total_days += float(row[days_col]) * weight
                 except: pass
                 
-            if col_map.get('count') != "선택안함" and col_map['count'] in master_df.columns:
-                try: total_count += float(row[col_map['count']]) * weight
+            # 금액 합산
+            if amt_col and pd.notna(row[amt_col]):
+                try: total_amt += float(row[amt_col]) * weight
                 except: pass
                 
-            if col_map.get('amt') != "선택안함" and col_map['amt'] in master_df.columns:
-                try: total_amt += float(row[col_map['amt']]) * weight
-                except: pass
-                
+            # 💡 실적 건수 = 조건에 맞는 행의 개수 (가중치 적용)
+            total_count += (1 * weight)
+            
         years = total_days / 365.0
         summary += f" - 환산 경력(년): {years:.2f}년\n"
         summary += f" - 환산 실적 건수: {total_count:.1f}건\n"
-        summary += f" - 환산 실적 금액: {total_amt:,.0f} (단위기준)\n\n"
+        summary += f" - 환산 실적 금액: {total_amt:,.0f}\n\n"
         
     return summary
 
@@ -183,7 +191,8 @@ class PQScoringEngine:
         structure = []
         for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
             row_str = " | ".join([str(c).strip() for c in row if c is not None and str(c).strip() != ""])
-            if row_str: structure.append({"row_num": row_idx, "row_content": row_str})
+            if row_str:
+                structure.append({"row_num": row_idx, "row_content": row_str})
         return structure
 
     def write_cell_safe(self, sheet, r, c, val):
@@ -196,27 +205,21 @@ class PQScoringEngine:
         else:
             cell.value = val
 
-    def run_ai_dreamteam_optimizer(self, notice_text, excel_bytes, semi_fixed, col_map):
-        master_db = load_master_db_from_drive()
-        if master_db.empty:
-            st.error("마스터 DB 엑셀 파일을 찾을 수 없습니다.")
-            return None, pd.DataFrame(), [], [], []
-            
-        fact_data_summary = calculate_fact_data(master_db, col_map)
+    def run_ai_dreamteam_optimizer(self, notice_text, excel_bytes, semi_fixed, db_summary):
         excel_structure = self.parse_excel_structure(excel_bytes)
         excel_json_str = json.dumps(excel_structure, ensure_ascii=False, indent=2)
         
         prompt = f"""
-        당신은 수학 연산 권한이 완전히 차단된 '단순 데이터 매칭 로봇'입니다.
-        [파이썬 시스템 사전 계산 팩트 데이터]에 명시된 환산 수치만을 100% 맹신하여, [세부평가기준]의 배점 구간을 찾고 [자기평가표 엑셀 구조]의 정확한 행(row_num)에 <점수>와 <팩트>를 기입하세요.
+        당신은 어떠한 수학적 연산도 하지 않는 '좌표 매칭 로봇'입니다.
+        [파이썬 시스템 자동 산출 팩트 데이터]에 명시된 환산 수치를 100% 맹신하여, [세부평가기준]의 배점 구간을 찾고 [자기평가표 엑셀 구조]의 정확한 행(row_num)에 <점수>와 <팩트>를 기입하세요.
 
         [★★★★★ 절대 준수 규칙]
-        1. **계산 창조 금지:** 이전처럼 예시 숫자나 허구의 숫자를 지어내지 마세요. 주어진 팩트 데이터(예: 윤석순 5.33년 등)를 그대로 적용하세요.
-        2. **기술인 역할 강제 매칭:** 엑셀 구조 내에 '사업책임'이라고 적힌 줄에는 PM의 데이터, '분야별책임'에는 PE의 데이터, '분야별참여'에는 PES의 데이터를 각각 정확히 연결해서 점수를 찾으세요. 
-        3. **신용평가등급 절대 규칙:** 당사는 '{semi_fixed.get('credit_rating')}'입니다. 회사채 기준 세부기준표를 보면 BB- 등급은 무조건 **2.8점**입니다. 
-        4. **업무중첩도 절대 규칙:** 구간이 '{semi_fixed.get('overlap_level')}'이므로, 세부기준 배점표에서 해당 구간의 **최하점(사업책임 3.6점, 분야별책임 2.4점)**을 무조건 적용하세요.
-        5. **가점 절대 규칙:** 신규고용율이 {semi_fixed.get('new_hire_rate')}% 이므로 세부기준 가점표에서 최고구간인 **0.3점**을 무조건 적용하세요.
-        6. **reason(산출근거) 간결화:** 수식을 뺀 최종 팩트 숫자만 기입. (예: "<환산경력년수>년", "<건수>건", "특급", "BB-", "350% 이상", "7.0%")
+        1. **계산 창조 금지:** 스스로 더하거나 나누지 마세요. 주어진 팩트 데이터(예: 윤석순 5.33년, 22건 등)를 그대로 적용하세요.
+        2. **기술인 역할 매칭:** 엑셀 구조의 '사업책임'에는 PM의 데이터, '분야별책임'에는 PE, '분야별참여'에는 PES를 연결하세요.
+        3. **신용평가등급:** 당사는 '{semi_fixed.get('credit_rating')}'입니다. 회사채 기준 세부기준표에서 BB- 등급은 **2.8점**입니다.
+        4. **업무중첩도:** '{semi_fixed.get('overlap_level')}' 이므로 최고 감점 구간인 **3.6점(사책), 2.4점(분책)**을 적용하세요.
+        5. **산출근거(reason) 초간결화:** 수식을 뺀 최종 숫자만 적으세요. (예: "5.33년", "22건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
+        6. **소계/총계 연산:** 엑셀 상의 '계', '소계', '총계' 행은 도출된 하위 항목 획득점수를 더해서 적고, 'reason'은 "-" 로 하세요.
 
         [사용자 확인 반고정 항목]
         - 신용평가등급: {semi_fixed.get('credit_rating')}
@@ -230,7 +233,7 @@ class PQScoringEngine:
         [자기평가표 엑셀 구조 (이 번호에 맞춰 점수 기입)]
         {excel_json_str}
 
-        {fact_data_summary}
+        {db_summary}
 
         오직 순수 JSON으로만 반환:
         {{
@@ -290,7 +293,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend]
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 파이썬 사전 계산(환각 원천 차단) + 엑셀 직접 주입 엔진")
+st.caption("※ 시트 자동 분류 및 행 단위(Row-count) 실적 스캔 완전체 엔진")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. DB/서류 관리", "⚙️ 2. 공고문 설정", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
 
@@ -320,36 +323,21 @@ with tab1:
         st.subheader("Zone B: '기술인' 서류 스캔")
         if st.button("🔍 드라이브 재스캔"):
             scan_drive_archive_cached.clear()
+            load_master_db_from_drive.clear()
             st.rerun()
         archive_data = scan_drive_archive_cached()
         if archive_data: st.success(f"📂 기술자 {len(archive_data)}명 스캔 완료!")
 
 with tab2:
-    st.markdown("### 📊 마스터 DB 컬럼 수동/자동 매핑")
-    st.caption("AI의 계산 실수를 막기 위해, 시스템(Python)이 직접 일수와 금액을 합산합니다. 이를 위해 마스터 DB의 컬럼명을 정확히 지정해 주세요.")
+    st.markdown("### 📊 파이썬 자동 연산 모니터 (마스터 DB 팩트 체크)")
+    st.caption("시스템이 마스터 DB의 각 시트(기술인)를 순회하며, 행 개수(건수)와 일수, 금액을 가중치(1.0/0.8)를 적용해 선행 계산한 결과입니다.")
     
-    master_db = load_master_db_from_drive()
-    if not master_db.empty:
-        cols = ["선택안함"] + master_db.columns.astype(str).tolist()
-        guess = {'name':0, 'grade':0, 'type':0, 'days':0, 'count':0, 'amt':0}
-        for i, c in enumerate(cols):
-            if '성명' in c or '이름' in c or '기술인' in c: guess['name'] = i
-            elif '등급' in c: guess['grade'] = i
-            elif '공종' in c or '분야' in c: guess['type'] = i
-            elif '일수' in c or '참여일' in c or '기간' in c: guess['days'] = i
-            elif '건수' in c or '수량' in c: guess['count'] = i
-            elif '금액' in c or '백만원' in c: guess['amt'] = i
-            
-        c1, c2, c3 = st.columns(3)
-        st.session_state.col_map['name'] = c1.selectbox("이름 컬럼", cols, index=guess['name'])
-        st.session_state.col_map['grade'] = c2.selectbox("등급 컬럼", cols, index=guess['grade'])
-        st.session_state.col_map['type'] = c3.selectbox("공종(교량/터널 등) 컬럼", cols, index=guess['type'])
-        
-        c4, c5, c6 = st.columns(3)
-        st.session_state.col_map['days'] = c4.selectbox("참여일수 컬럼", cols, index=guess['days'])
-        st.session_state.col_map['count'] = c5.selectbox("실적건수 컬럼", cols, index=guess['count'])
-        st.session_state.col_map['amt'] = c6.selectbox("실적금액 컬럼", cols, index=guess['amt'])
-        st.success("✅ 매핑이 완료되었습니다. 시스템이 이 컬럼을 바탕으로 가중치(1.0 / 0.8) 환산을 100% 정확하게 선행 계산합니다.")
+    db_dict = load_master_db_from_drive()
+    if db_dict:
+        # DB 서머리 캐싱
+        st.session_state.db_summary_cache = calculate_fact_data(db_dict)
+        st.text_area("마스터 DB 자동 분석 결과", st.session_state.db_summary_cache, height=300)
+        st.success("✅ 불필요한 매핑 없이 시트 이름과 행 개수, 컬럼 키워드 스캔을 통해 완벽한 팩트 데이터를 추출했습니다.")
     else:
         st.warning("구글 드라이브에 '마스터'가 포함된 엑셀 파일을 올려주세요.")
 
@@ -368,14 +356,19 @@ with tab3:
         st.session_state.semi_fixed = sf
         st.session_state.semi_fixed_confirmed = st.checkbox("항목 확인 완료", value=st.session_state.semi_fixed_confirmed)
 
-    if st.button("🚀 점수 산출 (파이썬 사전 계산 방식)", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
+    if st.button("🚀 자기평가표 점수 자동 기입", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
         if not st.session_state.raw_excel_bytes:
             st.error("엑셀 템플릿이 없습니다.")
-        elif st.session_state.col_map.get('name') == "선택안함":
-            st.error("Tab 2에서 마스터 DB 컬럼 매핑을 확인해주세요.")
+        elif not st.session_state.db_summary_cache:
+            st.error("마스터 DB 분석 결과가 없습니다. Tab 2를 확인하세요.")
         else:
             with st.spinner('시스템이 수학 계산을 완료하고 엑셀 원본 파일에 좌표를 찍어 덮어쓰고 있습니다...'):
-                final_excel, log_df, pm, pe, pes = engine.run_ai_dreamteam_optimizer(st.session_state.notice_text, st.session_state.raw_excel_bytes, st.session_state.semi_fixed, st.session_state.col_map)
+                final_excel, log_df, pm, pe, pes = engine.run_ai_dreamteam_optimizer(
+                    st.session_state.notice_text, 
+                    st.session_state.raw_excel_bytes, 
+                    st.session_state.semi_fixed, 
+                    st.session_state.db_summary_cache
+                )
                 if final_excel:
                     st.success("🎉 산출 완료! Tab 4에서 완성된 원본 엑셀 파일을 다운로드하세요.")
                     st.session_state.final_excel_bytes = final_excel
@@ -383,7 +376,7 @@ with tab3:
                     st.dataframe(log_df, use_container_width=True)
 
 with tab4:
-    st.markdown("### 🖨️ 자동 패키징")
+    st.markdown("### 🖨️ 서류 출력 및 패키징")
     if st.session_state.dream_team:
         if st.button("🔄 증빙 서류 및 엑셀 결과 다운로드 (ZIP)", type="primary"):
             with st.spinner("압축 중..."):
