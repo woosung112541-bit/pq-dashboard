@@ -23,11 +23,11 @@ if 'semi_fixed' not in st.session_state:
         "investment_ratio": 3.03,       
     }
 if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
-if 'dream_team' not in st.session_state: st.session_state.dream_team = []
+if 'dream_team' not in st.session_state: st.session_state.dream_team = {"pm": "", "pe": "", "pes": ""}
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
 if 'raw_excel_bytes' not in st.session_state: st.session_state.raw_excel_bytes = b""
 if 'final_excel_bytes' not in st.session_state: st.session_state.final_excel_bytes = b""
-if 'db_summary_cache' not in st.session_state: st.session_state.db_summary_cache = ""
+if 'db_summary_cache' not in st.session_state: st.session_state.db_summary_cache = {}
 
 with st.sidebar:
     st.markdown("### 🧠 AI 엔진 설정")
@@ -73,7 +73,6 @@ def load_master_db_from_drive():
         while not done: _, done = downloader.next_chunk()
         fh.seek(0)
         
-        # 💡 [핵심 진화 1] 엑셀의 모든 '시트(Sheet)'를 각각의 데이터프레임으로 통째로 읽어옵니다.
         return pd.read_excel(fh, sheet_name=None)
     except Exception: return {}
 
@@ -124,66 +123,55 @@ def scan_drive_archive_cached():
         return archive_status
     except Exception: return {}
 
-# 💡 [핵심 진화 2] 멍청한 수동 UI 삭제 및 파이썬 스마트 팩트 데이터 추출기 (시트명=이름, 행개수=실적건수)
+# 💡 [핵심 진화 1] 파이썬을 이용한 스마트 팩트 데이터 추출기 
 def calculate_fact_data(master_db_dict):
-    if not master_db_dict: return "마스터 DB 데이터 없음"
-    summary = "=== [파이썬 시스템 자동 산출 팩트 데이터] ===\n"
-    summary += "※ AI는 아래의 수치를 절대 임의로 변경하거나 재계산하지 말고, 오직 이 팩트 그대로 세부기준표에서 점수만 매칭할 것.\n\n"
+    if not master_db_dict: return {}
+    parsed_data = {}
+    total_company_count = 0.0
+    total_company_amt = 0.0
     
     for sheet_name, df in master_db_dict.items():
-        # Sheet1, Sheet2 같은 기본 시트명이나 빈 시트는 무시
         if df.empty or str(sheet_name).startswith('Sheet'): continue
-        
         name = str(sheet_name).strip()
-        summary += f"▶ 기술인: {name}\n"
-        summary += f" - 등급: 특급 (고정)\n"
         
-        # 컬럼 스캔 (대충 명칭이 달라도 유연하게 찾음)
         type_col = next((c for c in df.columns if any(k in str(c).replace(' ','') for k in ['공종', '분야', '시설물', '종류', '구분', '점검대상'])), None)
         days_col = next((c for c in df.columns if any(k in str(c).replace(' ','') for k in ['일수', '참여일', '기간', '인정'])), None)
         amt_col = next((c for c in df.columns if any(k in str(c).replace(' ','') for k in ['금액', '백만원', '준공', '도급'])), None)
         
-        total_days = 0.0
-        total_count = 0.0
-        total_amt = 0.0
+        total_days, total_count, total_amt = 0.0, 0.0, 0.0
         
         for _, row in df.iterrows():
-            # 빈 행(주요 데이터가 없는 껍데기 행)은 실적 개수에서 제외
             if (days_col and pd.isna(row[days_col])) and (amt_col and pd.isna(row[amt_col])):
                 continue
                 
-            # 가중치 판별 (교량/터널 100%, 기타 80%)
             weight = 0.8
             if type_col and pd.notna(row[type_col]):
                 val_type = str(row[type_col]).replace(' ', '')
                 if '교량' in val_type or '터널' in val_type: weight = 1.0
                 
-            # 일수 계산
-            d_val = 0
+            d_val, a_val = 0, 0
             if days_col and pd.notna(row[days_col]):
                 try: d_val = float(str(row[days_col]).replace(',', ''))
                 except: pass
             total_days += d_val * weight
             
-            # 금액 계산
-            a_val = 0
             if amt_col and pd.notna(row[amt_col]):
                 try: a_val = float(str(row[amt_col]).replace(',', ''))
                 except: pass
             total_amt += a_val * weight
             
-            # 💡 실적 건수 = 조건에 맞는 유효한 행 1건당 가중치 곱합
             if d_val > 0 or a_val > 0:
                 total_count += (1 * weight)
             
         years = total_days / 365.0
-        if total_amt > 1000000: total_amt = total_amt / 1000000 # 금액 단위 보정
-            
-        summary += f" - 환산 경력(년): {years:.2f}년\n"
-        summary += f" - 환산 실적 건수: {total_count:.1f}건\n"
-        summary += f" - 환산 실적 금액: {total_amt:,.0f} 백만원\n\n"
+        if total_amt > 1000000: total_amt = total_amt / 1000000
         
-    return summary
+        parsed_data[name] = {"years": round(years, 2), "count": round(total_count, 1), "amt": round(total_amt, 0)}
+        total_company_count += total_count
+        total_company_amt += total_amt
+        
+    parsed_data["COMPANY"] = {"count": round(total_company_count, 1), "amt": round(total_company_amt, 0)}
+    return parsed_data
 
 # ==========================================
 # 🧠 [Backend Engine] 좌표 다이렉트 주입 엔진
@@ -209,28 +197,39 @@ class PQScoringEngine:
         else:
             cell.value = val
 
-    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, excel_bytes, semi_fixed, db_summary):
+    def run_ai_dreamteam_optimizer(self, notice_text, excel_bytes, semi_fixed, db_summary, dream_team):
         excel_structure = self.parse_excel_structure(excel_bytes)
         excel_json_str = json.dumps(excel_structure, ensure_ascii=False, indent=2)
         
+        pm_data = db_summary.get(dream_team['pm'], {"years":0, "count":0, "amt":0})
+        pe_data = db_summary.get(dream_team['pe'], {"years":0, "count":0, "amt":0})
+        pes_data = db_summary.get(dream_team['pes'], {"years":0, "count":0, "amt":0})
+        comp_data = db_summary.get("COMPANY", {"count":0, "amt":0})
+        
+        # 💡 [핵심 진화 2] AI에게 팩트를 줄 때, "어느 행에 어떤 데이터를 넣으라"고 지시.
+        fact_instructions = f"""
+        [적용해야 할 팩트 데이터 지시사항]
+        - '사업책임' 경력/실적 관련 행에는 이 수치를 적용: {pm_data['years']}년, {pm_data['count']}건, {pm_data['amt']:,.0f} 백만원, 등급: 특급
+        - '분야별책임' 경력/실적 관련 행에는 이 수치를 적용: {pe_data['years']}년, {pe_data['count']}건, {pe_data['amt']:,.0f} 백만원, 등급: 특급
+        - '분야별참여' 경력/실적 관련 행에는 이 수치를 적용: {pes_data['years']}년, {pes_data['count']}건, {pes_data['amt']:,.0f} 백만원, 등급: 특급
+        - '유사용역 수행실적' (회사 전체 실적) 관련 행에는 이 수치를 적용: {comp_data['count']}건, {comp_data['amt']:,.0f} 백만원
+        
+        - 신용평가등급: {semi_fixed.get('credit_rating')} -> 세부기준표에서 해당 구간 점수 적용 (BB-는 2.8점 등)
+        - 업무중첩도: '{semi_fixed.get('overlap_level')}' -> 세부기준표에서 350%이상 최고 감점 구간 적용 (사책 3.6점, 분책 2.4점)
+        - 신규고용율 가점: {semi_fixed.get('new_hire_rate')}% -> 세부기준 가점표 최고구간 (0.3점) 적용
+        """
+        
         prompt = f"""
         당신은 어떠한 수학적 연산도 하지 않는 '좌표 매칭 로봇'입니다.
-        [파이썬 시스템 자동 산출 팩트 데이터]에 명시된 환산 수치를 100% 맹신하여, [세부평가기준]의 배점 구간을 찾고 [자기평가표 엑셀 구조]의 정확한 행(row_num)에 <점수>와 <팩트>를 기입하세요.
+        아래 [적용해야 할 팩트 데이터 지시사항]에 나열된 수치를 100% 맹신하여, [세부평가기준]의 배점 구간을 찾고 [자기평가표 엑셀 구조]의 정확한 행(row_num)에 <점수>와 <팩트>를 기입하세요.
 
         [★★★★★ 절대 준수 규칙]
-        1. **계산 창조 금지:** 스스로 더하거나 나누지 마세요. 주어진 팩트 데이터(예: 윤석순 5.33년, 22건 등)를 그대로 적용하세요.
-        2. **기술인 역할 매칭:** 엑셀 구조의 '사업책임'에는 가장 점수가 높은 PM의 데이터, '분야별책임'에는 PE, '분야별참여'에는 PES를 연결하세요.
-        3. **신용평가등급:** 당사는 '{semi_fixed.get('credit_rating')}'입니다. 회사채 기준 세부기준표에서 해당 등급의 점수(예: BB-는 2.8점 등)를 정확히 반영하세요.
-        4. **업무중첩도:** '{semi_fixed.get('overlap_level')}' 이므로 최고 감점 구간을 찾아 최하점(예: 사업책임 3.6점, 분야별책임 2.4점)을 무조건 적용하세요.
-        5. **가점 절대 규칙:** 신규고용율이 {semi_fixed.get('new_hire_rate')}% 이므로 최고구간 가점(0.3점)을 무조건 적용하세요.
-        6. **reason(산출근거) 초간결화:** 수식을 뺀 최종 숫자만 적으세요. (예: "5.33년", "22건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
-        7. **소계/총계 연산:** 엑셀 상의 '계', '소계', '총계' 행은 도출된 하위 항목 획득점수를 더해서 적고, 'reason'은 "-" 로 하세요.
+        1. **계산 금지:** 스스로 숫자를 지어내거나 합치지 마세요.
+        2. **지시사항 절대 복종:** 제가 [팩트 데이터 지시사항]에서 불러준 수치(예: 5.33년 등)를 그대로 'reason'칸에 적고 점수를 매기세요.
+        3. **reason(산출근거) 초간결화:** 수식을 뺀 최종 숫자만 적으세요. (예: "5.33년", "22건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
+        4. **소계/총계 연산:** 엑셀 상의 '계', '소계', '총계' 행은 도출된 하위 항목 획득점수를 더해서 적고, 'reason'은 "-" 로 하세요.
 
-        [사용자 확인 반고정 항목]
-        - 신용평가등급: {semi_fixed.get('credit_rating')}
-        - 신규고용율: {semi_fixed.get('new_hire_rate')}%
-        - 업무중첩도 구간: {semi_fixed.get('overlap_level')}
-        - 기술개발비율: {semi_fixed.get('investment_ratio')}%
+        {fact_instructions}
 
         [세부평가기준 텍스트]
         {notice_text[:8000]} 
@@ -238,17 +237,12 @@ class PQScoringEngine:
         [자기평가표 엑셀 구조 (이 번호에 맞춰 점수 기입)]
         {excel_json_str}
 
-        {db_summary}
-
         오직 순수 JSON으로만 반환:
         {{
             "row_results": [
                 {{"row_num": 1, "score": "<찾은 총점>", "reason": "-"}},
                 {{"row_num": 8, "score": "<찾은 점수>", "reason": "<환산 경력>"}}
-            ],
-            "pm": ["<사업책임 이름>"],
-            "pe": ["<분야별책임 이름1>"],
-            "pes": ["<분야별참여 이름1>"]
+            ]
         }}
         """
         try:
@@ -286,11 +280,11 @@ class PQScoringEngine:
             wb.save(out_bytes)
             display_df = pd.DataFrame(ai_results)
             
-            return out_bytes.getvalue(), display_df, parsed.get("pm", []), parsed.get("pe", []), parsed.get("pes", [])
+            return out_bytes.getvalue(), display_df
             
         except Exception as e:
             st.error(f"연산 오류: {e}")
-            return None, pd.DataFrame(), [], [], []
+            return None, pd.DataFrame()
 
 engine = PQScoringEngine()
 
@@ -298,9 +292,9 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend]
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 시트(Sheet)별 분류 및 행(Row) 개수 기반 팩트 추출 완전체 엔진")
+st.caption("※ 시트 분류 & 수동 역할 배정 기반 환각 방탄 엔진")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📥 1. DB/서류 관리", "⚙️ 2. 데이터 팩트체크", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
+tab1, tab2, tab3, tab4 = st.tabs(["📥 1. DB/서류 관리", "⚙️ 2. 인원 배정 및 팩트체크", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
 
 with tab1:
     col1, col2 = st.columns(2)
@@ -334,14 +328,41 @@ with tab1:
         if archive_data: st.success(f"📂 기술자 {len(archive_data)}명 스캔 완료!")
 
 with tab2:
-    st.markdown("### 📊 파이썬 자동 연산 모니터 (마스터 DB 팩트 체크)")
-    st.caption("시스템이 마스터 DB의 각 시트(기술인 이름)를 순회하며, 조건에 맞는 필터링 후 행 개수(건수)와 일수, 금액을 가중치(1.0/0.8)를 적용해 선행 계산한 결과입니다. (AI는 절대 이 수치를 임의로 수정할 수 없습니다.)")
+    st.markdown("### 📊 인원 배정 및 시스템 자동 계산 결과")
+    st.caption("시스템이 마스터 DB의 각 시트를 스캔하여 환산 경력과 실적을 계산했습니다. 각 직책에 맞는 사람을 선택해 주세요.")
     
     db_dict = load_master_db_from_drive()
     if db_dict:
-        st.session_state.db_summary_cache = calculate_fact_data(db_dict)
-        st.text_area("마스터 DB 자동 분석 결과", st.session_state.db_summary_cache, height=300)
-        st.success("✅ 불필요한 매핑 과정 없이 시트 이름과 유효한 행 개수 기반으로 완벽한 팩트 데이터를 추출했습니다.")
+        # 데이터 계산 후 캐싱
+        if not st.session_state.db_summary_cache:
+            st.session_state.db_summary_cache = calculate_fact_data(db_dict)
+            
+        summary_data = st.session_state.db_summary_cache
+        engineers = [name for name in summary_data.keys() if name != "COMPANY"]
+        
+        # 💡 [핵심 진화 3] AI가 맘대로 사람을 섞지 못하게 사용자가 드롭다운으로 명시적 지정
+        st.write("#### 👤 투입 기술자 선택")
+        col_pm, col_pe, col_pes = st.columns(3)
+        with col_pm: 
+            pm_name = st.selectbox("사업책임 (PM)", engineers, index=0 if len(engineers) > 0 else None)
+        with col_pe: 
+            pe_name = st.selectbox("분야별책임 (PE)", engineers, index=1 if len(engineers) > 1 else 0)
+        with col_pes: 
+            pes_name = st.selectbox("분야별참여 (PES)", engineers, index=2 if len(engineers) > 2 else 0)
+            
+        st.session_state.dream_team = {"pm": pm_name, "pe": pe_name, "pes": pes_name}
+        
+        st.write("#### 📈 파이썬 사전 계산 팩트 (이 수치가 AI에게 전달됩니다)")
+        
+        if pm_name:
+            st.info(f"**[사업책임] {pm_name}:** 환산경력 {summary_data[pm_name]['years']}년 | 환산건수 {summary_data[pm_name]['count']}건 | 금액 {summary_data[pm_name]['amt']:,.0f}백만원")
+        if pe_name:
+            st.info(f"**[분야별책임] {pe_name}:** 환산경력 {summary_data[pe_name]['years']}년 | 환산건수 {summary_data[pe_name]['count']}건 | 금액 {summary_data[pe_name]['amt']:,.0f}백만원")
+        if pes_name:
+            st.info(f"**[분야별참여] {pes_name}:** 환산경력 {summary_data[pes_name]['years']}년 | 환산건수 {summary_data[pes_name]['count']}건 | 금액 {summary_data[pes_name]['amt']:,.0f}백만원")
+        if "COMPANY" in summary_data:
+            st.success(f"**[회사 전체 실적]:** 환산건수 {summary_data['COMPANY']['count']}건 | 금액 {summary_data['COMPANY']['amt']:,.0f}백만원")
+            
     else:
         st.warning("구글 드라이브에 '마스터'가 포함된 엑셀 파일을 올려주세요.")
 
@@ -366,23 +387,22 @@ with tab3:
         elif not st.session_state.db_summary_cache:
             st.error("마스터 DB 분석 결과가 없습니다. Tab 2를 확인하세요.")
         else:
-            with st.spinner('시스템이 수학 계산을 완료하고 엑셀 원본 파일에 좌표를 찍어 덮어쓰고 있습니다...'):
-                final_excel, log_df, pm, pe, pes = engine.run_ai_dreamteam_optimizer(
-                    1, 2, 2, 
+            with st.spinner('시스템이 팩트 데이터를 엑셀 원본 파일의 좌표에 덮어쓰고 있습니다...'):
+                final_excel, log_df = engine.run_ai_dreamteam_optimizer(
                     st.session_state.notice_text, 
                     st.session_state.raw_excel_bytes, 
                     st.session_state.semi_fixed, 
-                    st.session_state.db_summary_cache
+                    st.session_state.db_summary_cache,
+                    st.session_state.dream_team
                 )
                 if final_excel:
                     st.success("🎉 산출 완료! Tab 4에서 완성된 원본 엑셀 파일을 다운로드하세요.")
                     st.session_state.final_excel_bytes = final_excel
-                    st.session_state.dream_team = pm + pe + pes
                     st.dataframe(log_df, use_container_width=True)
 
 with tab4:
     st.markdown("### 🖨️ 서류 출력 및 패키징")
-    if st.session_state.dream_team:
+    if st.session_state.dream_team.get("pm"):
         if st.button("🔄 증빙 서류 및 엑셀 결과 다운로드 (ZIP)", type="primary"):
             with st.spinner("압축 중..."):
                 try:
@@ -394,7 +414,9 @@ with tab4:
                     z_buf = io.BytesIO()
                     with zipfile.ZipFile(z_buf, "w") as z:
                         z.writestr("0_완성된_자기평가표(원본보존).xlsx", st.session_state.final_excel_bytes)
-                        for p_name in st.session_state.dream_team:
+                        
+                        dt = st.session_state.dream_team
+                        for p_name in [dt['pm'], dt['pe'], dt['pes']]:
                             if p_name in f_map:
                                 pdfs = get_all_files_recursively(drive_service, f_map[p_name], ['application/pdf'])
                                 for p_file in pdfs:
