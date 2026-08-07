@@ -148,18 +148,17 @@ class PQScoringEngine:
             return pd.DataFrame(), [], [], []
             
         db_csv = master_db.to_csv(index=False)
-        available_engineers = list(scan_drive_archive_cached().keys())
         
         prompt = f"""
-        당신은 아주 엄격한 건설엔지니어링 PQ 심사관입니다.
-        [자기평가표 엑셀 양식]의 구조(행, 열, 항목명)를 100% 동일하게 유지한 상태에서, [마스터 DB]의 팩트 데이터를 [공고문 세부기준]의 배점 구간에 매칭시켜 빈칸(획득점수, 근거)만 채우세요.
+        당신은 어떠한 요약이나 가공도 허용되지 않는 '단순 데이터 입력 매크로'입니다.
+        아래 [자기평가표 엑셀 양식(CSV)]의 모든 행(Row)과 열(Column)을 100% 동일하게 복사하여 JSON으로 변환하세요.
 
         [★★★★★ 절대 준수 룰]
-        1. 지정공고문과 세부기준이 다를 시 '지정공고문'을 우선합니다.
-        2. [자기평가표 엑셀 양식]에 있는 분류, 평가항목 순서를 절대 섞거나 임의로 창조하지 마세요.
-        3. 신용평가등급은 {semi_fixed.get('credit_rating')} 입니다. 세부기준표에서 BB-가 속하는 구간의 점수(예: B-이상~BBB-미만 등)를 정확히 찾아 반영하세요.
-        4. 경력(년), 실적(건), 실적(금액)은 DB의 수치를 어림짐작하지 말고 정확히 소수점까지 계산하여 세부기준의 배점 구간에 맞춰 점수를 산정하세요.
-        5. 데이터가 없으면 "직접 입력 필요"라고 적고 0점 처리하세요.
+        1. **행(Row) 병합/생략 절대 금지:** 제공된 CSV 양식에 있는 줄 수 그대로 출력해야 합니다. 항목을 임의로 묶거나(예: '실적건수 및 금액' 등) 요약하면 즉시 시스템이 파괴됩니다. 빈 칸이 있는 줄(예: 소계, 계)도 무조건 그대로 출력하세요.
+        2. **컬럼(Key) 동적 생성:** JSON의 Key는 제가 임의로 정하지 않습니다. 원본 CSV의 헤더(예: '평가항목', '배점', '자기평가 점수', '산출근거' 등)를 그대로 Key로 사용하세요.
+        3. 당신의 유일한 임무는 100% 복사된 뼈대 안에서 비어있는 '점수'와 '산출근거' 열만 [마스터 DB]와 [세부기준]을 바탕으로 정확히 계산해서 채우는 것입니다.
+        4. 신용평가등급은 {semi_fixed.get('credit_rating')} 입니다. 세부기준표 구간을 확인하여 정확한 감점 점수를 기입하세요.
+        5. 데이터가 없으면 0점 처리하고 근거에 "직접 입력 필요"라고 명시하세요.
 
         [사용자 확인 반고정 항목]
         - 신용평가등급: {semi_fixed.get('credit_rating')}
@@ -170,7 +169,7 @@ class PQScoringEngine:
         [공고문 및 세부기준 텍스트]
         {notice_text[:8000]} 
 
-        [자기평가표 엑셀 양식]
+        [자기평가표 엑셀 양식 (이 구조를 100% 그대로 복사할 것)]
         {self_eval_template}
 
         [마스터 DB]
@@ -178,7 +177,10 @@ class PQScoringEngine:
 
         오직 순수 JSON으로만 반환:
         {{
-            "pq_score_table": [ {{"평가항목": "..", "배점": "..", "획득점수": 0.0, "점수계산근거": ".."}} ],
+            "pq_score_table": [
+                // 원본 CSV의 컬럼명을 그대로 Key로 사용. 줄(Row) 개수 동일 유지.
+                // 예: {{"평가항목": "...", "배점": "...", "자기평가 점수": "...", "산출근거": "..."}}
+            ],
             "pm": [".."], "pe": [".."], "pes": [".."]
         }}
         """
@@ -198,7 +200,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend]
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 엑셀 템플릿 절대 미러링 및 세부 구간 정밀 매칭 엔진 탑재")
+st.caption("※ 엑셀 원본 행(Row) 절대 보존 매크로 엔진 탑재")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
 
@@ -209,7 +211,7 @@ with tab1:
         st.subheader("Zone A: 공고/양식 업로드")
         notice_files = st.file_uploader("PDF 공고문 및 Excel 자기평가표 업로드", type=['pdf', 'xlsx'], accept_multiple_files=True)
         if notice_files and api_key and st.button("🧠 업로드 문서 AI 분석", type="primary"):
-            with st.spinner("엑셀 양식을 복제하고 기준을 파악 중입니다..."):
+            with st.spinner("엑셀 양식을 100% 매핑하여 복제 중입니다..."):
                 notice_temp, excel_temp = "", ""
                 for file in notice_files:
                     if file.name.lower().endswith('.pdf'):
@@ -220,7 +222,7 @@ with tab1:
                         excel_temp += df_ex.to_csv(index=False)
                 st.session_state.notice_text = notice_temp
                 st.session_state.self_eval_template = excel_temp
-                st.success("✅ 문서 매칭 완료!")
+                st.success("✅ 문서 매칭 완료! 엑셀 서식이 시스템에 강제 주입되었습니다.")
 
     with col2:
         st.subheader("Zone B: '기술인' 서류 스캔")
@@ -236,8 +238,8 @@ with tab2:
     st.markdown("### 📊 세부 설정 확인")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.write(f"- 기업 신용평가등급: **{st.session_state.semi_fixed['credit_rating']}** (세부기준 구간 적용)")
-        st.write("- 자기평가서 엑셀 양식: **적용 완료** (구조 100% 유지)")
+        st.write(f"- 기업 신용평가등급: **{st.session_state.semi_fixed['credit_rating']}**")
+        st.write("- 자기평가서 엑셀 양식: **강제 적용 완료** (요약 불가 상태)")
 
 # --- [Tab 3] ---
 with tab3:
@@ -256,7 +258,7 @@ with tab3:
         st.session_state.semi_fixed_confirmed = st.checkbox("항목 확인 완료", value=st.session_state.semi_fixed_confirmed)
 
     if st.button("🚀 자기평가서 엑셀 미러링 기반 점수 산출", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
-        with st.spinner('엑셀 양식에 팩트 데이터(경력/실적/신용도)를 정확히 매핑 중입니다...'):
+        with st.spinner('원본 엑셀의 줄(Row)을 그대로 복사하여 팩트 데이터를 채우고 있습니다...'):
             df_res, pm, pe, pes = engine.run_ai_dreamteam_optimizer(1, 2, 2, st.session_state.notice_text, st.session_state.self_eval_template, st.session_state.semi_fixed)
             if not df_res.empty:
                 st.success("🎉 산출 완료!")
