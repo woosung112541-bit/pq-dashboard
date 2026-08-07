@@ -18,9 +18,13 @@ st.set_page_config(page_title="PQ 자동화 대시보드", layout="wide")
 if 'semi_fixed' not in st.session_state:
     st.session_state.semi_fixed = {
         "credit_rating": "BB-",       
+        "penalty_points": "해당없음",   
         "new_hire_rate": 7.0,          
         "overlap_level": "최고 (350% 이상)",        
         "investment_ratio": 3.03,       
+        "patent_tech_count": 5,        
+        "bid_restriction": "해당없음",  
+        "inspection_penalty": "해당없음",  
     }
 if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
 if 'dream_team' not in st.session_state: st.session_state.dream_team = {"pm": "", "pe": "", "pes": ""}
@@ -123,7 +127,7 @@ def scan_drive_archive_cached():
         return archive_status
     except Exception: return {}
 
-# 💡 [핵심 진화 1] 파이썬을 이용한 스마트 팩트 데이터 추출기 
+# 💡 [핵심 엔진 1] 파이썬을 이용한 스마트 팩트 데이터 추출기 (딕셔너리 반환)
 def calculate_fact_data(master_db_dict):
     if not master_db_dict: return {}
     parsed_data = {}
@@ -206,7 +210,6 @@ class PQScoringEngine:
         pes_data = db_summary.get(dream_team['pes'], {"years":0, "count":0, "amt":0})
         comp_data = db_summary.get("COMPANY", {"count":0, "amt":0})
         
-        # 💡 [핵심 진화 2] AI에게 팩트를 줄 때, "어느 행에 어떤 데이터를 넣으라"고 지시.
         fact_instructions = f"""
         [적용해야 할 팩트 데이터 지시사항]
         - '사업책임' 경력/실적 관련 행에는 이 수치를 적용: {pm_data['years']}년, {pm_data['count']}건, {pm_data['amt']:,.0f} 백만원, 등급: 특급
@@ -225,7 +228,7 @@ class PQScoringEngine:
 
         [★★★★★ 절대 준수 규칙]
         1. **계산 금지:** 스스로 숫자를 지어내거나 합치지 마세요.
-        2. **지시사항 절대 복종:** 제가 [팩트 데이터 지시사항]에서 불러준 수치(예: 5.33년 등)를 그대로 'reason'칸에 적고 점수를 매기세요.
+        2. **지시사항 절대 복종:** 제가 [팩트 데이터 지시사항]에서 불러준 수치(예: 5.33년 등)를 그대로 'reason'칸에 적고 해당 구간의 점수를 매기세요.
         3. **reason(산출근거) 초간결화:** 수식을 뺀 최종 숫자만 적으세요. (예: "5.33년", "22건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
         4. **소계/총계 연산:** 엑셀 상의 '계', '소계', '총계' 행은 도출된 하위 항목 획득점수를 더해서 적고, 'reason'은 "-" 로 하세요.
 
@@ -333,14 +336,12 @@ with tab2:
     
     db_dict = load_master_db_from_drive()
     if db_dict:
-        # 데이터 계산 후 캐싱
         if not st.session_state.db_summary_cache:
             st.session_state.db_summary_cache = calculate_fact_data(db_dict)
             
         summary_data = st.session_state.db_summary_cache
-        engineers = [name for name in summary_data.keys() if name != "COMPANY"]
+        engineers = [str(name) for name in summary_data.keys() if name != "COMPANY"]
         
-        # 💡 [핵심 진화 3] AI가 맘대로 사람을 섞지 못하게 사용자가 드롭다운으로 명시적 지정
         st.write("#### 👤 투입 기술자 선택")
         col_pm, col_pe, col_pes = st.columns(3)
         with col_pm: 
