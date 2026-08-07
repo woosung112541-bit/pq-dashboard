@@ -37,7 +37,7 @@ if 'semi_fixed' not in st.session_state:
 if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
-if 'self_eval_template' not in st.session_state: st.session_state.self_eval_template = ""
+if 'df_template' not in st.session_state: st.session_state.df_template = pd.DataFrame() # 💡 엑셀 원본 DataFrame 보존용
 if 'final_pq_score_table' not in st.session_state: st.session_state.final_pq_score_table = pd.DataFrame()
 
 with st.sidebar:
@@ -138,10 +138,10 @@ def scan_drive_archive_cached():
     except Exception: return {}
 
 # ==========================================
-# 🧠 [Backend Engine]
+# 🧠 [Backend Engine] 좌표 주입식(Row-Index Injection) 엔진
 # ==========================================
 class PQScoringEngine:
-    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, self_eval_template, semi_fixed):
+    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, df_template, semi_fixed):
         master_db = load_master_db_from_drive()
         if master_db.empty:
             st.error("마스터 DB 엑셀 파일을 찾을 수 없습니다.")
@@ -149,16 +149,24 @@ class PQScoringEngine:
             
         db_csv = master_db.to_csv(index=False)
         
+        # 💡 [핵심] 엑셀의 각 행(Row)에 고유 번호(row_index)를 달아서 AI에게 전달
+        records = []
+        for idx, row in df_template.iterrows():
+            record = {"row_index": str(idx)}
+            record.update(row.to_dict())
+            records.append(record)
+        template_json_str = json.dumps(records, ensure_ascii=False, indent=2)
+        
         prompt = f"""
-        당신은 어떠한 요약이나 가공도 허용되지 않는 '단순 데이터 입력 매크로'입니다.
-        아래 [자기평가표 엑셀 양식(CSV)]의 모든 행(Row)과 열(Column)을 100% 동일하게 복사하여 JSON으로 변환하세요.
+        당신은 아주 엄격하고 기계적인 '데이터 채점 매크로'입니다.
+        아래 [입력받은 엑셀 양식(JSON)]에는 각 줄마다 "row_index"가 부여되어 있습니다.
+        당신의 임무는 공고문과 마스터 DB를 비교 분석하여, 각 "row_index"에 들어가야 할 [획득점수]와 [산출근거]만 계산해내는 것입니다.
 
-        [★★★★★ 절대 준수 룰]
-        1. **행(Row) 병합/생략 절대 금지:** 제공된 CSV 양식에 있는 줄 수 그대로 출력해야 합니다. 항목을 임의로 묶거나(예: '실적건수 및 금액' 등) 요약하면 즉시 시스템이 파괴됩니다. 빈 칸이 있는 줄(예: 소계, 계)도 무조건 그대로 출력하세요.
-        2. **컬럼(Key) 동적 생성:** JSON의 Key는 제가 임의로 정하지 않습니다. 원본 CSV의 헤더(예: '평가항목', '배점', '자기평가 점수', '산출근거' 등)를 그대로 Key로 사용하세요.
-        3. 당신의 유일한 임무는 100% 복사된 뼈대 안에서 비어있는 '점수'와 '산출근거' 열만 [마스터 DB]와 [세부기준]을 바탕으로 정확히 계산해서 채우는 것입니다.
-        4. 신용평가등급은 {semi_fixed.get('credit_rating')} 입니다. 세부기준표 구간을 확인하여 정확한 감점 점수를 기입하세요.
-        5. 데이터가 없으면 0점 처리하고 근거에 "직접 입력 필요"라고 명시하세요.
+        [★★★★★ 절대 규칙]
+        1. 지정공고문과 세부기준이 다를 시 '지정공고문'을 우선 적용합니다.
+        2. 신용평가등급은 {semi_fixed.get('credit_rating')} 입니다. 세부기준표에서 BB-가 속하는 구간을 찾아 엄격히 감점하세요.
+        3. 경력, 실적건수, 금액은 DB의 수치를 정확히 소수점까지 계산하고 세부기준 배점 구간을 확인하세요.
+        4. 해당 row가 단순한 대분류/중분류 제목이거나 계산할 데이터가 없으면 score는 빈 문자열(""), reason은 "직접 입력 필요" 또는 ""(빈칸)으로 두세요.
 
         [사용자 확인 반고정 항목]
         - 신용평가등급: {semi_fixed.get('credit_rating')}
@@ -169,19 +177,22 @@ class PQScoringEngine:
         [공고문 및 세부기준 텍스트]
         {notice_text[:8000]} 
 
-        [자기평가표 엑셀 양식 (이 구조를 100% 그대로 복사할 것)]
-        {self_eval_template}
+        [입력받은 엑셀 양식 (이 데이터의 row_index를 Key로 사용할 것)]
+        {template_json_str}
 
         [마스터 DB]
         {db_csv}
 
-        오직 순수 JSON으로만 반환:
+        오직 순수 JSON으로만 반환하세요. JSON 구조는 반드시 아래와 같아야 합니다:
         {{
-            "pq_score_table": [
-                // 원본 CSV의 컬럼명을 그대로 Key로 사용. 줄(Row) 개수 동일 유지.
-                // 예: {{"평가항목": "...", "배점": "...", "자기평가 점수": "...", "산출근거": "..."}}
-            ],
-            "pm": [".."], "pe": [".."], "pes": [".."]
+            "row_results": {{
+                "0": {{"score": "15.0", "reason": "특급기술자 충족"}},
+                "1": {{"score": "6.4", "reason": "환산 5.33년 적용"}},
+                "2": {{"score": "", "reason": ""}} // 점수가 안 들어가는 빈 행의 경우
+            }},
+            "pm": ["이름1"],
+            "pe": ["이름2"],
+            "pes": ["이름3"]
         }}
         """
         try:
@@ -189,7 +200,22 @@ class PQScoringEngine:
             response = model.generate_content(prompt)
             result_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
             parsed = json.loads(result_text)
-            return pd.DataFrame(parsed.get("pq_score_table", [])), parsed.get("pm", []), parsed.get("pe", []), parsed.get("pes", [])
+            
+            # 💡 [핵심] AI가 계산한 결과값을 파이썬이 원본 엑셀 DataFrame에 직접 '끼워 넣음'
+            ai_results = parsed.get("row_results", {})
+            result_df = df_template.copy()
+            
+            # 엑셀 원본을 훼손하지 않기 위해 우측에 새 컬럼을 추가하여 결과 주입
+            result_df["[AI 계산] 획득점수"] = ""
+            result_df["[AI 계산] 산출근거"] = ""
+            
+            for idx in result_df.index:
+                idx_str = str(idx)
+                if idx_str in ai_results:
+                    result_df.at[idx, "[AI 계산] 획득점수"] = ai_results[idx_str].get("score", "")
+                    result_df.at[idx, "[AI 계산] 산출근거"] = ai_results[idx_str].get("reason", "")
+            
+            return result_df, parsed.get("pm", []), parsed.get("pe", []), parsed.get("pes", [])
         except Exception as e:
             st.error(f"연산 오류: {e}")
             return pd.DataFrame(), [], [], []
@@ -200,7 +226,7 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend]
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 엑셀 원본 행(Row) 절대 보존 매크로 엔진 탑재")
+st.caption("※ 엑셀 원본 구조 절대 보존 (Row-Index 좌표 주입 방식 탑재)")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. 마스터 DB 관리", "⚙️ 2. 공고문 설정", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
 
@@ -211,18 +237,23 @@ with tab1:
         st.subheader("Zone A: 공고/양식 업로드")
         notice_files = st.file_uploader("PDF 공고문 및 Excel 자기평가표 업로드", type=['pdf', 'xlsx'], accept_multiple_files=True)
         if notice_files and api_key and st.button("🧠 업로드 문서 AI 분석", type="primary"):
-            with st.spinner("엑셀 양식을 100% 매핑하여 복제 중입니다..."):
-                notice_temp, excel_temp = "", ""
+            with st.spinner("엑셀 뼈대를 고정하고 공고문 기준을 파악 중입니다..."):
+                notice_temp = ""
+                df_ex_temp = pd.DataFrame()
                 for file in notice_files:
                     if file.name.lower().endswith('.pdf'):
                         pdf = PyPDF2.PdfReader(file)
-                        for page in pdf.pages[:18]: notice_temp += page.extract_text() or ""
+                        for page in pdf.pages[:20]: notice_temp += page.extract_text() or ""
                     elif file.name.lower().endswith('.xlsx'):
-                        df_ex = pd.read_excel(file)
-                        excel_temp += df_ex.to_csv(index=False)
-                st.session_state.notice_text = notice_temp
-                st.session_state.self_eval_template = excel_temp
-                st.success("✅ 문서 매칭 완료! 엑셀 서식이 시스템에 강제 주입되었습니다.")
+                        df_ex_temp = pd.read_excel(file)
+                        df_ex_temp = df_ex_temp.fillna("") # 빈칸(NaN) 에러 방지
+                
+                if not df_ex_temp.empty:
+                    st.session_state.notice_text = notice_temp
+                    st.session_state.df_template = df_ex_temp
+                    st.success("✅ 문서 분석 완료! 엑셀 구조가 시스템에 완벽히 고정되었습니다.")
+                else:
+                    st.error("엑셀 파일이 업로드되지 않았거나 읽을 수 없습니다.")
 
     with col2:
         st.subheader("Zone B: '기술인' 서류 스캔")
@@ -236,10 +267,12 @@ with tab1:
 # --- [Tab 2] ---
 with tab2:
     st.markdown("### 📊 세부 설정 확인")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.write(f"- 기업 신용평가등급: **{st.session_state.semi_fixed['credit_rating']}**")
-        st.write("- 자기평가서 엑셀 양식: **강제 적용 완료** (요약 불가 상태)")
+    st.write(f"- 기업 신용평가등급: **{st.session_state.semi_fixed['credit_rating']}**")
+    if not st.session_state.df_template.empty:
+        st.write("- **업로드된 자기평가서 엑셀 뼈대 (요약/수정 절대 불가 상태):**")
+        st.dataframe(st.session_state.df_template.astype(str), use_container_width=True)
+    else:
+        st.warning("Tab 1에서 엑셀 파일을 업로드해 주세요.")
 
 # --- [Tab 3] ---
 with tab3:
@@ -257,14 +290,24 @@ with tab3:
         st.session_state.semi_fixed = sf
         st.session_state.semi_fixed_confirmed = st.checkbox("항목 확인 완료", value=st.session_state.semi_fixed_confirmed)
 
-    if st.button("🚀 자기평가서 엑셀 미러링 기반 점수 산출", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
-        with st.spinner('원본 엑셀의 줄(Row)을 그대로 복사하여 팩트 데이터를 채우고 있습니다...'):
-            df_res, pm, pe, pes = engine.run_ai_dreamteam_optimizer(1, 2, 2, st.session_state.notice_text, st.session_state.self_eval_template, st.session_state.semi_fixed)
-            if not df_res.empty:
-                st.success("🎉 산출 완료!")
-                st.dataframe(df_res.astype(str), use_container_width=True)
-                st.session_state.final_pq_score_table = df_res
-                st.session_state.dream_team = pm + pe + pes
+    if st.button("🚀 자기평가서 점수 산출 (좌표 주입)", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
+        if st.session_state.df_template.empty:
+            st.error("엑셀 템플릿이 없습니다. Tab 1에서 엑셀을 업로드하세요.")
+        else:
+            with st.spinner('원본 엑셀의 줄(Row) 번호에 맞춰 정확한 팩트 데이터를 끼워 넣고 있습니다...'):
+                df_res, pm, pe, pes = engine.run_ai_dreamteam_optimizer(1, 2, 2, st.session_state.notice_text, st.session_state.df_template, st.session_state.semi_fixed)
+                if not df_res.empty:
+                    st.success("🎉 산출 완료! 엑셀 원본 구조가 100% 보존되었습니다.")
+                    
+                    def highlight_manual_input(row):
+                        if '직접 입력' in str(row.get('[AI 계산] 산출근거', '')):
+                            return ['background-color: #ffe6e6'] * len(row)
+                        return [''] * len(row)
+                        
+                    st.dataframe(df_res.astype(str).style.apply(highlight_manual_input, axis=1), use_container_width=True)
+                    st.session_state.final_pq_score_table = df_res
+                    st.session_state.dream_team = pm + pe + pes
+                    st.info(f"👉 **최종 선발 명단:** {', '.join(st.session_state.dream_team)}")
 
 # --- [Tab 4] ---
 with tab4:
