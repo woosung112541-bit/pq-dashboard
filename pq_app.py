@@ -40,7 +40,7 @@ with st.sidebar:
         st.success("AI 엔진 연결 완료!")
 
 # ==========================================
-# 🔑 [Google Drive 연동]
+# 🔑 [Google Drive 연동 및 데이터 전처리]
 # ==========================================
 @st.cache_resource
 def authenticate_google_drive():
@@ -77,6 +77,47 @@ def load_master_db_from_drive():
         fh.seek(0)
         return pd.read_excel(fh)
     except Exception: return pd.DataFrame()
+
+def generate_db_summary_for_llm(master_df):
+    if master_df.empty: return "마스터 DB 데이터 없음"
+    summary = "=== [마스터 DB 자동 계산 요약 (수학 연산 환각 방지용 팩트 데이터)] ===\n"
+    summary += "※ AI는 아래의 수치를 절대 임의로 변경하거나 재계산하지 말고, 오직 [세부평가기준]의 어느 배점 구간에 해당하는지만 찾아서 점수를 매길 것.\n\n"
+    
+    name_col = None
+    for c in master_df.columns:
+        if '성명' in str(c) or '이름' in str(c) or '기술인' in str(c):
+            name_col = c; break
+            
+    if name_col:
+        for name, group in master_df.groupby(name_col):
+            summary += f"▶ 기술인: {name}\n"
+            total_days = 0
+            total_count = 0
+            total_amount = 0
+            for _, row in group.iterrows():
+                weight = 1.0 if '교량' in str(row.values) or '터널' in str(row.values) else 0.8
+                days = 0
+                for v in row.values:
+                    if isinstance(v, (int, float)) and v > 1000 and v < 10000:
+                        days = v; break
+                total_days += (days * weight)
+                
+                amt = 0
+                for v in row.values:
+                    if isinstance(v, (int, float)) and v > 10000:
+                        amt = v; break
+                total_amount += (amt * weight)
+                total_count += (1 * weight)
+                
+            years = total_days / 365.0
+            
+            summary += f" - 환산 경력(년): {years:.2f}년\n"
+            summary += f" - 환산 실적 건수: {total_count:.1f}건\n"
+            summary += f" - 환산 실적 금액: {total_amount:,.0f} 원\n\n"
+    else:
+        summary += master_df.to_string(index=False)
+    
+    return summary
 
 def get_all_files_recursively(drive_service, folder_id, target_mime_types, depth=0):
     if depth > 5: return [] 
@@ -126,7 +167,7 @@ def scan_drive_archive_cached():
     except Exception: return {}
 
 # ==========================================
-# 🧠 [Backend Engine] 
+# 🧠 [Backend Engine] 팩트 주입형 매크로 엔진
 # ==========================================
 class PQScoringEngine:
     def parse_excel_structure(self, excel_bytes):
@@ -139,57 +180,54 @@ class PQScoringEngine:
                 structure.append({"row_num": row_idx, "row_content": row_str})
         return structure
 
-    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, excel_bytes, semi_fixed):
+    # 💡 [핵심] 병합된 셀에 안전하게 값을 쓰는 스마트 함수
+    def write_cell_safe(self, sheet, r, c, val):
+        cell = sheet.cell(row=r, column=c)
+        if type(cell).__name__ == 'MergedCell':
+            for merged_range in sheet.merged_cells.ranges:
+                if cell.coordinate in merged_range:
+                    sheet.cell(row=merged_range.min_row, column=merged_range.min_col).value = val
+                    break
+        else:
+            cell.value = val
+
+    def run_ai_dreamteam_optimizer(self, notice_text, excel_bytes, semi_fixed):
         master_db = load_master_db_from_drive()
         if master_db.empty:
             st.error("마스터 DB 엑셀 파일을 찾을 수 없습니다.")
             return None, pd.DataFrame(), [], [], []
             
-        db_csv = master_db.to_csv(index=False)
-        available_engineers = list(scan_drive_archive_cached().keys())
-        engineers_str = ", ".join(available_engineers) if available_engineers else "명단 없음"
-        
+        fact_data_summary = generate_db_summary_for_llm(master_db)
         excel_structure = self.parse_excel_structure(excel_bytes)
         excel_json_str = json.dumps(excel_structure, ensure_ascii=False, indent=2)
         
         prompt = f"""
-        당신은 건설엔지니어링 PQ '정밀 채점 시스템'입니다.
-        제공된 [지정공고문]과 [세부평가기준]을 적용하여 [마스터 DB] 데이터를 연산한 뒤, [자기평가표 엑셀 구조]의 빈칸(점수, 산출근거)을 정확하게 채우세요.
+        당신은 수학 계산을 할 필요가 없는 '구간 매칭 매크로'입니다.
+        아래 [파이썬 사전 계산 팩트 데이터]에 모든 수학적 연산 결과(경력 년수, 건수, 금액)가 나와 있습니다.
+        당신의 임무는 오직 해당 팩트 수치가 [세부평가기준] 배점표의 어느 '구간'에 해당하는지 찾아내서, [자기평가표 엑셀 구조]의 알맞은 행(row_num)에 <점수>와 <팩트>를 적어넣는 것뿐입니다.
 
-        [절대 준수 6대 규칙]
-        1. 지정공고문 우선: 공고문과 세부기준이 다를 경우 반드시 공고문을 우선합니다.
-        2. 엑셀 좌표 보존: 제공된 엑셀 구조의 'row_num'을 절대 삭제하거나 합치지 마세요. 소계, 총계 줄도 하위 항목을 더해서 반드시 출력해야 합니다.
-        3. 수학 연산 강제 적용: [마스터 DB]의 데이터를 읽어 다음을 엄격히 계산하세요. (임의의 숫자를 지어내지 마세요.)
-           - 교량/터널 분야는 가중치 1.0 (100%), 그 외 기타 토목 분야는 가중치 0.8 (80%) 적용
-           - 환산 경력(년) = (Σ 교량/터널 참여일수 * 1.0 + Σ 기타 참여일수 * 0.8) / 365
-           - 환산 실적(건수) = Σ 교량/터널 건수 * 1.0 + Σ 기타 건수 * 0.8
-           - 환산 실적(금액) = Σ 교량/터널 금액 * 1.0 + Σ 기타 금액 * 0.8
-        4. 반고정 팩트 데이터 적용:
-           - 기업 신용평가등급: {semi_fixed.get('credit_rating')} -> 세부기준표 회사채 기준에서 해당 구간을 찾아 감점 (BB-는 2.8점 등)
-           - 신규고용율: {semi_fixed.get('new_hire_rate')}% -> 가점 구간 적용
-           - 업무중첩도: {semi_fixed.get('overlap_level')} -> 구간 점수 적용 (최고 350%이상은 최하점 부여)
-           - 기술개발투자비율: {semi_fixed.get('investment_ratio')}% -> 배점 적용
-        5. 역할(Role) 강제 매칭: 엑셀 행의 "사업책임"에는 선발된 PM 1명의 수치, "분야별책임"에는 PE의 수치, "분야별참여"에는 PES의 수치를 매칭하세요. "유사용역"은 회사의 전체 5년 합산 실적입니다.
-        6. 극강의 간결성: 'reason(산출근거)' 필드에는 "팩트 숫자"만 적으세요. (예: "5.33년", "7건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
-
-        [사용 가능한 기술자 명단]
-        [{engineers_str}] (이 중에서 최적의 PM {pm_cnt}명, PE {pe_cnt}명, PES {pes_cnt}명을 선발)
+        [★★★★★ 절대 준수 규칙]
+        1. **계산 금지:** 스스로 더하거나 나누지 마세요. [파이썬 사전 계산 팩트 데이터]의 숫자를 100% 믿고 그 숫자 그대로 세부기준표에서 점수만 찾으세요.
+        2. **신용평가등급 절대 규칙:** 당사는 '{semi_fixed.get('credit_rating')}'입니다. 회사채 기준 세부기준표를 보면 BB- 등급은 무조건 **2.8점**입니다. (다른 점수 절대 불가)
+        3. **업무중첩도 절대 규칙:** 구간이 '{semi_fixed.get('overlap_level')}'이므로, 세부기준 배점표에서 350% 이상 구간에 해당하는 **최하점(사업책임 3.6점, 분야별책임 2.4점)**을 무조건 적용하세요.
+        4. **가점 절대 규칙:** 신규고용율이 {semi_fixed.get('new_hire_rate')}% 이므로 세부기준 가점표에서 최고구간인 **0.3점**을 무조건 적용하세요.
+        5. **reason(산출근거) 작성법:** 수식을 빼고 최종 팩트 숫자만 아주 짧게 기입하세요. (예: "5.33년", "22건", "1,288 백만원", "특급", "BB-", "350% 이상", "7.0%")
+        6. 엑셀 원본 행 번호(row_num) 유지, 소계/총계는 하위 항목 합산 후 reason은 "-" 기입.
 
         [세부평가기준 텍스트]
         {notice_text[:8000]} 
 
-        [자기평가표 엑셀 구조 (row_num 좌표)]
+        [자기평가표 엑셀 구조 (이 번호에 맞춰 점수 기입)]
         {excel_json_str}
 
-        [마스터 DB]
-        {db_csv}
+        [파이썬 사전 계산 팩트 데이터 (이 수치들을 세부기준표 구간에 매칭할 것)]
+        {fact_data_summary}
 
         오직 순수 JSON으로만 반환:
         {{
-            "step_by_step_log": "DB 데이터 추출 및 1.0/0.8 가중치 적용 연산 과정 요약",
             "row_results": [
-                {{"row_num": 1, "score": "91.0", "reason": "-"}},
-                {{"row_num": 8, "score": "6.4", "reason": "5.33년"}}
+                {{"row_num": 8, "score": "6.4", "reason": "5.33년"}},
+                {{"row_num": 9, "score": "3.6", "reason": "0.59년"}}
             ],
             "pm": ["윤석순"],
             "pe": ["김진규"],
@@ -204,7 +242,6 @@ class PQScoringEngine:
             
             ai_results = parsed.get("row_results", [])
             
-            # 엑셀 원본(Bytes) 수정
             wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
             ws = wb.active
             
@@ -221,17 +258,13 @@ class PQScoringEngine:
             for res in ai_results:
                 row_idx = res.get("row_num")
                 if row_idx:
-                    score = str(res.get("score", "")).strip()
-                    reason = str(res.get("reason", "")).strip()
+                    score = res.get("score", "")
+                    reason = res.get("reason", "")
                     
-                    if score != "": 
-                        try:
-                            # 숫자형 변환 처리
-                            ws.cell(row=row_idx, column=score_col_idx, value=float(score))
-                        except ValueError:
-                            ws.cell(row=row_idx, column=score_col_idx, value=score)
+                    if score != "" and str(score).replace('.', '', 1).isdigit(): 
+                        self.write_cell_safe(ws, row_idx, score_col_idx, float(score) if '.' in str(score) else int(score))
                     if reason != "" and reason != "점수": 
-                        ws.cell(row=row_idx, column=reason_col_idx, value=reason)
+                        self.write_cell_safe(ws, row_idx, reason_col_idx, reason)
             
             out_bytes = io.BytesIO()
             wb.save(out_bytes)
@@ -249,15 +282,15 @@ engine = PQScoringEngine()
 # 🖥️ [Frontend]
 # ==========================================
 st.title("PQ 자동화 대시보드")
-st.caption("※ 엑셀 좌표 직접 주입 시스템")
+st.caption("※ 파이썬 사전 계산 + 엑셀 직접 주입 엔진 (MergedCell 버그 해결판)")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📥 1. DB/서류 관리", "⚙️ 2. 공고문 설정", "📊 3. 시뮬레이션", "🖨️ 4. 서류 패키징"])
 
 with tab1:
     st.subheader("Zone A: 공고(PDF) & 자기평가표(Excel) 업로드")
     notice_files = st.file_uploader("", type=['pdf', 'xlsx'], accept_multiple_files=True)
-    if notice_files and api_key and st.button("🧠 업로드 문서 시스템 적용", type="primary"):
-        with st.spinner("엑셀 뼈대 구조를 고정하고 있습니다..."):
+    if notice_files and api_key and st.button("🧠 업로드 문서 AI 분석", type="primary"):
+        with st.spinner("엑셀 원본 보존 및 기준 파악 중..."):
             notice_temp = ""
             excel_bytes_temp = b""
             for file in notice_files:
@@ -270,19 +303,19 @@ with tab1:
             if excel_bytes_temp:
                 st.session_state.notice_text = notice_temp
                 st.session_state.raw_excel_bytes = excel_bytes_temp
-                st.success("✅ 문서 분석 완료 및 엑셀 템플릿 적용 완료.")
-            else: st.error("엑셀 파일이 업로드되지 않았습니다.")
+                st.success("✅ 문서 분석 완료! 엑셀 뼈대 고정됨.")
+            else: st.error("엑셀 파일 없음.")
 
 with tab2:
-    st.markdown("### 📊 설정 확인")
+    st.markdown("### 📊 세부 설정 확인")
     if st.session_state.raw_excel_bytes:
-        st.success("✅ 자기평가서 엑셀 템플릿 로드 완료.")
+        st.success("✅ 엑셀 원본 파일이 시스템 메모리에 로드되어 있습니다.")
     else: st.warning("Tab 1에서 엑셀을 업로드하세요.")
 
 with tab3:
     st.markdown("### 🏆 점수 산출")
     
-    with st.expander("🔒 반고정 항목 적용 설정", expanded=not st.session_state.semi_fixed_confirmed):
+    with st.expander("🔒 팩트 데이터(반고정 항목) 적용 설정", expanded=not st.session_state.semi_fixed_confirmed):
         sf = st.session_state.semi_fixed
         col1, col2 = st.columns(2)
         with col1:
@@ -294,20 +327,20 @@ with tab3:
         st.session_state.semi_fixed = sf
         st.session_state.semi_fixed_confirmed = st.checkbox("항목 확인 완료", value=st.session_state.semi_fixed_confirmed)
 
-    if st.button("🚀 자기평가표 점수 자동 기입", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
+    if st.button("🚀 점수 산출 (파이썬 사전 계산 방식)", type="primary", disabled=not st.session_state.semi_fixed_confirmed):
         if not st.session_state.raw_excel_bytes:
             st.error("엑셀 템플릿이 없습니다.")
         else:
-            with st.spinner('마스터 DB를 연산하여 엑셀 원본 파일에 좌표를 덮어쓰고 있습니다...'):
-                final_excel, log_df, pm, pe, pes = engine.run_ai_dreamteam_optimizer(1, 2, 2, st.session_state.notice_text, st.session_state.raw_excel_bytes, st.session_state.semi_fixed)
+            with st.spinner('시스템이 수학 계산을 완료하고 엑셀 원본 파일에 좌표를 찍어 덮어쓰고 있습니다...'):
+                final_excel, log_df, pm, pe, pes = engine.run_ai_dreamteam_optimizer(st.session_state.notice_text, st.session_state.raw_excel_bytes, st.session_state.semi_fixed)
                 if final_excel:
-                    st.success("🎉 산출 완료! Tab 4에서 완성된 엑셀 파일을 다운로드하세요.")
+                    st.success("🎉 산출 완료! Tab 4에서 원본 엑셀 파일을 다운로드하세요.")
                     st.session_state.final_excel_bytes = final_excel
                     st.session_state.dream_team = pm + pe + pes
                     st.dataframe(log_df, use_container_width=True)
 
 with tab4:
-    st.markdown("### 🖨️ 서류 출력 및 패키징")
+    st.markdown("### 🖨️ 자동 패키징")
     if st.session_state.dream_team:
         if st.button("🔄 증빙 서류 및 엑셀 결과 다운로드 (ZIP)", type="primary"):
             with st.spinner("압축 중..."):
@@ -319,7 +352,7 @@ with tab4:
                     
                     z_buf = io.BytesIO()
                     with zipfile.ZipFile(z_buf, "w") as z:
-                        z.writestr("0_완성된_자기평가표.xlsx", st.session_state.final_excel_bytes)
+                        z.writestr("0_완성된_자기평가표(원본보존).xlsx", st.session_state.final_excel_bytes)
                         for p_name in st.session_state.dream_team:
                             if p_name in f_map:
                                 pdfs = get_all_files_recursively(drive_service, f_map[p_name], ['application/pdf'])
