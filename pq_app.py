@@ -25,6 +25,21 @@ if 'auto_settings' not in st.session_state:
         "pm_cnt": 1, "pe_cnt": 2, "pes_cnt": 2,
         "extra_settings": {}
     }
+if 'semi_fixed' not in st.session_state:
+    # 회사 단위로 "거의 고정"이지만 시점에 따라 바뀔 수 있는 값들.
+    # 과거에는 신용등급(BB-) 하나만 프롬프트에 하드코딩했으나, 매 실행마다
+    # 사용자가 직접 확인하고 넘어가도록 UI 입력값으로 전환한다.
+    st.session_state.semi_fixed = {
+        "credit_rating": "BB-",       # 재정상태 건실도 산정 기준
+        "penalty_points": "해당없음",   # 참여업체·기술인 벌점
+        "new_hire_rate": 0.0,          # 건설기술인 신규고용율 (%)
+        "overlap_level": "최저",        # 업무중첩도 구간: 최저/중간/최고 중 선택
+        "investment_ratio": 0.0,       # 기술개발투자실적 비율 (%)
+        "patent_tech_count": 0,        # 건설신기술·특허 활용 건수
+        "bid_restriction": "해당없음",  # 입찰참가제한·업무정지
+        "inspection_penalty": "해당없음",  # 점검·진단 실시결과 처분 이력
+    }
+if 'semi_fixed_confirmed' not in st.session_state: st.session_state.semi_fixed_confirmed = False
 if 'dream_team' not in st.session_state: st.session_state.dream_team = []
 if 'notice_text' not in st.session_state: st.session_state.notice_text = ""
 if 'self_eval_template' not in st.session_state: st.session_state.self_eval_template = ""
@@ -167,7 +182,7 @@ def get_ai_model():
 # 🧠 [Backend Engine] AI 다이렉트 100점 만점 시뮬레이션 엔진
 # ==========================================
 class PQScoringEngine:
-    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, self_eval_template):
+    def run_ai_dreamteam_optimizer(self, pm_cnt, pe_cnt, pes_cnt, notice_text, self_eval_template, semi_fixed):
         master_db = load_master_db_from_drive()
         if master_db.empty:
             st.error("❌ 구글 드라이브에서 '마스터'라는 이름이 포함된 엑셀 파일을 찾을 수 없습니다.")
@@ -181,11 +196,22 @@ class PQScoringEngine:
         당신은 건설엔지니어링 PQ 최고 심사위원입니다.
         아래 제공된 [공고문 텍스트(PDF)], [자기평가표 양식(Excel)], [엔지니어 실적 Master DB]를 융합 분석하여 최적의 드림팀과 평가 점수표를 산출하세요.
 
-        [★★★★★ 절대 준수 4대 규칙]
+        [★★★★★ 절대 준수 규칙]
         1. **완벽한 서식 미러링:** 반환하는 JSON "pq_score_table"은 아래 제공된 [자기평가표 양식(Excel)]의 행/열 구조와 배점을 토씨 하나 틀리지 말고 100% 똑같이 유지하세요. 당신은 획득점수와 계산근거만 채웁니다.
-        2. **데이터 부재 시 "직접 입력 필요":** 마스터 DB를 조회했을 때 실적 데이터(백파일)가 없거나 산출 근거를 도저히 계산할 수 없는 항목은 억지로 점수를 부여하지 마세요! 획득점수를 빈칸(또는 0)으로 두고, 점수계산근거에 반드시 **"직접 입력 필요"**라고 적으세요.
-        3. **만점 환각(Hallucination) 금지:** DB에 실적이 있다면 반드시 '실제 건수/금액'을 바탕으로 공고문 기준에 따라 깎을 건 깎으세요. 근거에 실제 수치를 적어야 합니다.
-        4. **신용도 BB- 고정 강제:** 당사의 기업신용등급은 **'BB-'** 입니다. 신용도 배점에서 BB-에 해당하는 실제 점수를 무조건 감점 처리하세요.
+        2. **데이터 부재 시 "직접 입력 필요":** 마스터 DB 및 [기술인] 드라이브 폴더 서류를 조회했을 때 실적 데이터(백파일)가 없거나 산출 근거를 도저히 계산할 수 없는 항목은 억지로 점수를 부여하지 마세요! 획득점수를 빈칸(또는 0)으로 두고, 점수계산근거에 반드시 **"직접 입력 필요"**라고 적으세요.
+        3. **만점 환각(Hallucination) 금지:** DB에 실적이 있다면 반드시 '실제 건수/금액'을 바탕으로 공고문 및 세부평가기준 상의 제한사항(최근 N년, 준공 여부, 직무분야=토목 한정, 자체안전점검 제외, 교량·터널 100%/기타토목 80% 가중치 등)을 정확히 적용해 깎을 건 깎으세요. 근거에 실제 수치와 적용한 제한조건을 적으세요.
+        4. **사용자 확인 반고정값 그대로 사용:** 아래 [사용자 확인 반고정 항목]은 회사 단위로 거의 고정이지만 시점마다 바뀔 수 있어 매번 사용자가 직접 확인한 값입니다. 당신이 임의로 추정하지 말고 주어진 값을 그대로 적용하세요.
+        5. **등급·경력·실적·유사용역수행실적은 자료 기반 자동 산출:** 위 반고정 항목에 포함되지 않은 모든 항목(등급, 경력, 실적건수/금액, 유사용역수행실적 등)은 마스터 DB와 [기술인] 드라이브 폴더의 실제 서류만 근거로 계산하세요. 유사용역수행실적은 참여기술인 개인별 실적을 합산하는 것이 아니라, 동일 계약이 여러 기술인 시트에 중복 기재된 경우 회사 단위로 한 번만 인정해야 합니다.
+
+        [사용자 확인 반고정 항목]
+        - 신용평가등급: {semi_fixed.get('credit_rating')}
+        - 참여업체·기술인 벌점: {semi_fixed.get('penalty_points')}
+        - 건설기술인 신규고용율: {semi_fixed.get('new_hire_rate')}%
+        - 업무중첩도 구간: {semi_fixed.get('overlap_level')}
+        - 기술개발투자실적 비율: {semi_fixed.get('investment_ratio')}%
+        - 건설신기술·특허 활용 건수: {semi_fixed.get('patent_tech_count')}건
+        - 입찰참가제한·업무정지: {semi_fixed.get('bid_restriction')}
+        - 점검·진단 실시결과 처분 이력: {semi_fixed.get('inspection_penalty')}
 
         [후보군 및 조건]
         - 가용 기술자 명단: [{engineers_str}]
@@ -405,13 +431,42 @@ with tab2:
 # --- [Tab 3] 책임기술자 시뮬레이션 결과 ---
 with tab3:
     st.markdown("### 🏆 최종 시뮬레이션 및 엄격한 점수 산출")
-    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (엑셀 자기평가표 미러링)", type="primary"):
+
+    CREDIT_GRADES = ["AAA","AA+","AA0","AA-","A+","A0","A-","BBB+","BBB0","BBB-",
+                      "BB+","BB0","BB-","B+","B0","B-","CCC+ 이하","미제출"]
+
+    with st.expander("🔒 반고정 항목 확인 (실행 전 필수)", expanded=not st.session_state.semi_fixed_confirmed):
+        st.caption("회사 단위로 거의 고정이지만 시점에 따라 바뀔 수 있는 값입니다. AI가 임의로 추정하지 않고, 아래에서 직접 확인한 값을 그대로 채점에 반영합니다.")
+        sf = st.session_state.semi_fixed
+        col1, col2 = st.columns(2)
+        with col1:
+            sf['credit_rating'] = st.selectbox("신용평가등급", CREDIT_GRADES,
+                                                index=CREDIT_GRADES.index(sf['credit_rating']) if sf['credit_rating'] in CREDIT_GRADES else 0)
+            sf['penalty_points'] = st.text_input("참여업체·기술인 벌점 (최근 2년 누계평균, 없으면 '해당없음')", value=sf['penalty_points'])
+            sf['new_hire_rate'] = st.number_input("건설기술인 신규고용율 (%)", value=float(sf['new_hire_rate']), step=0.1)
+            sf['overlap_level'] = st.selectbox("업무중첩도 구간(사업책임·분야별책임)", ["최저","중간","최고"],
+                                                index=["최저","중간","최고"].index(sf['overlap_level']))
+        with col2:
+            sf['investment_ratio'] = st.number_input("기술개발투자실적 비율 (%, 최근 3년 매출대비)", value=float(sf['investment_ratio']), step=0.01)
+            sf['patent_tech_count'] = st.number_input("건설신기술·특허 활용 건수", value=int(sf['patent_tech_count']), step=1)
+            sf['bid_restriction'] = st.text_input("입찰참가제한·업무정지 (없으면 '해당없음')", value=sf['bid_restriction'])
+            sf['inspection_penalty'] = st.text_input("점검·진단 실시결과 처분 이력 (없으면 '해당없음')", value=sf['inspection_penalty'])
+        st.session_state.semi_fixed = sf
+        st.session_state.semi_fixed_confirmed = st.checkbox(
+            "위 값을 직접 확인했습니다. 이번 실행에 그대로 사용합니다.", value=st.session_state.semi_fixed_confirmed)
+
+    if not st.session_state.semi_fixed_confirmed:
+        st.caption("⬆️ 반고정 항목을 확인 체크해야 시뮬레이션을 실행할 수 있습니다.")
+
+    if st.button("🚀 마스터 DB 딥러닝 시뮬레이션 실행 (엑셀 자기평가표 미러링)", type="primary",
+                  disabled=not st.session_state.semi_fixed_confirmed):
         if not st.session_state.notice_text or not st.session_state.self_eval_template:
             st.warning("⚠️ [Tab 1]에서 공고문(PDF)과 자기평가표(Excel)를 먼저 분석해야 합니다!")
         else:
             with st.spinner('AI가 엑셀 양식을 복제하고 데이터 부재 항목은 "직접 입력 필요"로 분류하며 연산 중입니다... (약 15초 소요)'):
                 best_score_df, rec_pm, rec_pe, rec_pes = engine.run_ai_dreamteam_optimizer(
-                    final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text, st.session_state.self_eval_template
+                    final_pm_cnt, final_pe_cnt, final_pes_cnt, st.session_state.notice_text,
+                    st.session_state.self_eval_template, st.session_state.semi_fixed
                 )
                 
                 if not best_score_df.empty:
